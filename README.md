@@ -1,5 +1,9 @@
 # Scattering-sample optics simulation
 
+by Razmik Avagyan
+
+Goal: a full simulation of the experiment as a base for AI agents that run and supervise it, later on the real setup.
+
 This project simulates light passing through a phase-only SLM (N squares) and a strongly
 scattering sample, with a camera recording intensities at M points. The sample is a random
 complex transmission matrix X, using the row convention `E_out = E_in @ X`,
