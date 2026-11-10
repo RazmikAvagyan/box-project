@@ -1,0 +1,39 @@
+{
+  "settings": {
+    "N": 64,
+    "M": 64,
+    "image_shape": [
+      8,
+      8
+    ],
+    "L_ratio": 8,
+    "seed": 0,
+    "ggs_seed": 1,
+    "test_seed": 5,
+    "noise_level": 0.04,
+    "phase_error": 0.3,
+    "flicker": 0.05,
+    "bit_depth": 8,
+    "full_scale": 640,
+    "n_test": 100,
+    "focus_target": 27,
+    "max_iter": 3000,
+    "tol": 1e-06,
+    "n_restarts": 3,
+    "restart_threshold": 0.25,
+    "out_dir": "results/main"
+  },
+  "results": {
+    "L": 512,
+    "ggs_iterations": 373,
+    "converged": true,
+    "restarted_columns": 2,
+    "run_time_s": 1.25952761300141,
+    "corr_mean": 0.9788613734465615,
+    "corr_min": 0.968612489048546,
+    "prediction_correlation": 0.8742235184051473,
+    "eta_mean": 44.51266639893085,
+    "eta_theory": 50.480084294039244,
+    "ratio": 0.8817866891752985
+  }
+}

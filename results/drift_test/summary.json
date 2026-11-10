@@ -1,0 +1,66 @@
+{
+  "settings": {
+    "N": 64,
+    "M": 64,
+    "image_shape": [
+      8,
+      8
+    ],
+    "L_ratio": 8,
+    "seed": 0,
+    "ggs_seed": 1,
+    "test_seed": 5,
+    "noise_level": 0.04,
+    "phase_error": 0.3,
+    "flicker": 0.05,
+    "bit_depth": 8,
+    "full_scale": 640,
+    "n_test": 100,
+    "focus_target": 27,
+    "max_iter": 3000,
+    "tol": 1e-06,
+    "n_restarts": 3,
+    "restart_threshold": 0.25,
+    "out_dir": "results/drift_test",
+    "duration_min": 5.0,
+    "dt_s": 15,
+    "T0": 20.0,
+    "warmup_s": 300,
+    "T_c": 1.6,
+    "y_seed": 42,
+    "box_seed": 3,
+    "ref_seed": 4
+  },
+  "results": {
+    "T_no_control": {
+      "start": 20.0,
+      "end": 22.195814923241187,
+      "min": 20.0
+    },
+    "T_with_control": {
+      "start": 20.001179678553587,
+      "end": 19.99784407708458,
+      "min": 19.990599839607807
+    },
+    "r_pred_no_control": {
+      "start": 0.8742235184051473,
+      "end": 0.05389127010409512,
+      "min": 0.05389127010409512
+    },
+    "r_pred_with_control": {
+      "start": 0.8698230650222034,
+      "end": 0.8743131295865432,
+      "min": 0.8555495882374247
+    },
+    "r_out_no_control": {
+      "start": 0.8359653726963886,
+      "end": 0.056393491582398494,
+      "min": 0.056393491582398494
+    },
+    "r_out_with_control": {
+      "start": 0.8305207013387437,
+      "end": 0.8274730018254292,
+      "min": 0.8111366474326172
+    }
+  }
+}

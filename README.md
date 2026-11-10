@@ -38,3 +38,21 @@ Install: `pip install -r requirements.txt`. Run everything from the project root
     python -m experiments.drift_test       # writes results/drift_test/
     python -m agents.lab_api               # self-test, a short lab story (no files)
     python -m agents.scenario              # 2-hour scenario without operator, writes results/scenario/
+
+## Results
+
+How well the map, measured once at t = 0, predicts the camera over 5 minutes, without and with temperature control:
+
+![Map accuracy over time](results/drift_test/01_map_accuracy_over_time.png)
+
+The focus spot at the start and after 5 minutes, without and with temperature control:
+
+![Focus spot at the start and after 5 minutes](results/drift_test/02_focus_spot_start_vs_end.png)
+
+The 2-hour scenario with no operator (the room warms, the cooler fails for 10 minutes, a new target):
+
+![Box and room temperature during the scenario](results/scenario/01_box_and_room_temperature_overview.png)
+
+Cooler power during the scenario, asked by the PID and really given:
+
+![Cooler power during the scenario](results/scenario/03_cooler_power_during_scenario.png)
