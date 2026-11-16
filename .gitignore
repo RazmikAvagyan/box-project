@@ -7,3 +7,6 @@ venv/
 .idea/
 CLAUDE.md
 .claude/
+*.sqlite
+results/lab_state.sqlite
+results/export/

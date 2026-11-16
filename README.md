@@ -13,7 +13,7 @@ The recovered map is then tested by focusing light through the sample and under 
 
 ## Layout
 
-- `config.py` — all numbers live in config.py: every tunable setting, one dict per module (`OPTICS`, `MAIN`, `DRIFT_TEST`, `THERMOSTAT`, `LAB_API`, `SCENARIO`), plus `TARGET_C`, with their sources.
+- `config.py` — all numbers live in config.py: every tunable setting, one dict per module (`OPTICS`, `MAIN`, `DRIFT_TEST`, `THERMOSTAT`, `LAB_API`, `SCENARIO`, `BASELINE`, `STATE`, `AGENT_LOOP`), plus `TARGET_C`, with their sources.
 - `optics_simulation/`
   - `lab.py` — the fake lab: random transmission matrix, 8-bit SLM patterns, SLM phase error, laser flicker, camera with noise/bit depth/saturation, temperature drift models, and `FakeLab`.
   - `ggs.py` — GGS recovery of X from E_in and amplitudes, with restarts for stuck columns (`recover`).
@@ -27,6 +27,9 @@ The recovered map is then tested by focusing light through the sample and under 
 - `agents/`
   - `lab_api.py` — `LabAPI`, the one door the future agents use: wait, read the thermometer, set the box target or control, measure/check a map and focus, all on one lab clock with a log.
   - `scenario.py` — timed world events the operator cannot see (warmer room, cooler failure, new target), run by `LabAPI`; the self-test runs 2 hours with no operator and writes results/scenario/.
+  - `baseline.py` — a simple operator with fixed rules ("never" re-measure vs. "rules": check the map every 5 min, re-measure below 0.8, warn when the box is off target), to compare the agents against later; writes results/baseline/.
+  - `state.py` — `LabState`, the shared lab database (a local SQLite file, built-in `sqlite3`): runs, thermometer readings (never the true temperature), maps, focus photos, actions and notes, written by `LabAPI` and read by the agents.
+  - `loop.py` — the agent loop Monitor → Diagnose → Plan → Act → Verify and a first Map agent with simple rules (re-measure only when the map is stale and the box is stable); `plan()` is the brain that an AI will replace; writes results/agents/.
 - `results/` — generated plots and data.
 
 ## Running
@@ -42,6 +45,9 @@ Install: `pip install -r requirements.txt`. Run everything from the project root
     python -m experiments.drift_test       # writes results/drift_test/
     python -m agents.lab_api               # self-test, a short lab story (no files)
     python -m agents.scenario              # 2-hour scenario without operator, writes results/scenario/
+    python -m agents.baseline              # fixed-rule operator vs. doing nothing, writes results/baseline/ and results/lab_state.sqlite
+    python -m agents.state                 # self-test of the lab database (temporary file)
+    python -m agents.loop                  # Map agent vs. never vs. rules, writes results/agents/
 
 ## Results
 

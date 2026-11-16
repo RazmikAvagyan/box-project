@@ -89,3 +89,20 @@ SCENARIO = {
     "target_change_at_s": 5400,    # s, a user asks for a new target [estimate]
     "new_target_C": 20.5,          # C, the new target [estimate]
 }
+
+BASELINE = {
+    "step_s": 60,                  # s, time between focus photos [estimate]
+    "check_every_s": 300,          # s, "rules": check the map this often [estimate]
+    "check_threshold": 0.8,        # "rules": measure a new map when check_map is below this [estimate]
+    "warn_after_s": 120,           # s, "rules": warn when |kalman - target| > limit_C for longer than this [estimate]
+}
+
+STATE = {
+    "db_path": "results/lab_state.sqlite",   # shared lab database (SQLite file, local only)
+    "temperature_every_s": 1,                # s, one temperature row this often
+}
+
+AGENT_LOOP = {
+    "stable_s": 120,               # s, the box is stable if |kalman - target| < limit_C for this long [estimate]
+    "retry_after_s": 60,           # s, run the loop again this soon when the map is stale but the box not stable [estimate]
+}

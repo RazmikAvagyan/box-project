@@ -1,0 +1,30 @@
+{
+  "settings": {
+    "step_s": 60,
+    "check_every_s": 300,
+    "check_threshold": 0.8,
+    "warn_after_s": 120
+  },
+  "results": {
+    "never": {
+      "mean_eta": 47.47410870346932,
+      "min_eta": 1.4667028158649502,
+      "share_eta_above_30": 0.9166666666666666,
+      "measure_map_calls": 0,
+      "check_map_calls": 0,
+      "lab_time_on_maps_s": 0.0,
+      "warnings": 0,
+      "maps_while_box_off_target": 0
+    },
+    "rules": {
+      "mean_eta": 54.4735394261894,
+      "min_eta": 1.5703667632826668,
+      "share_eta_above_30": 0.9416666666666667,
+      "measure_map_calls": 3,
+      "check_map_calls": 19,
+      "lab_time_on_maps_s": 408.0,
+      "warnings": 1,
+      "maps_while_box_off_target": 1
+    }
+  }
+}

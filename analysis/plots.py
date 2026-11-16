@@ -318,14 +318,14 @@ def plot_deviation_comparison(
     return _save(fig, path)
 
 
-def _event_lines(ax: plt.Axes, events: list[tuple[float, str]], key_y: float) -> None:
-    """Grey vertical lines at the event times (s, x axis in minutes), numbered 1, 2, ... at the bottom,
-    and one key line 'number label, ...' in grey at axes height key_y (below the legend)."""
+def _event_lines(ax: plt.Axes, events: list[tuple[float, str]], key_y: float, top: bool = False) -> None:
+    """Grey vertical lines at the event times (s, x axis in minutes), numbered 1, 2, ... at the bottom
+    (or at the top if top=True), and one key line 'number label, ...' in grey at axes height key_y."""
     for number, (t_event, _) in enumerate(events, start=1):
         ax.axvline(t_event / 60.0, linewidth=1.0, color="gray")
-        # A small number at the bottom of each line (y in axes coordinates).
-        ax.text(t_event / 60.0, 0.02, f"{number} ", va="bottom", ha="right", fontsize=10, color="gray",
-                transform=ax.get_xaxis_transform())
+        # A small number at the bottom or top of each line (y in axes coordinates).
+        ax.text(t_event / 60.0, 0.98 if top else 0.02, f"{number} ", va="top" if top else "bottom", ha="right",
+                fontsize=10, color="gray", transform=ax.get_xaxis_transform())
     key = ", ".join(f"{number} {label}" for number, (_, label) in enumerate(events, start=1))
     ax.text(0.5, key_y, key, ha="center", va="top", fontsize=10, color="gray", transform=ax.transAxes)
 
@@ -435,6 +435,35 @@ def plot_cooler_power(
     _event_lines(ax, events, key_y=-0.32)
     return _save(fig, path)
 
+def plot_policy_comparison(
+    curves: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    events: list[tuple[float, str]],
+    path: str | Path,
+    colors: dict[str, str] | None = None,
+    title: str = "Focus brightness during the scenario: never re-measure vs. fixed rules",
+) -> Path:
+    """Focus enhancement eta over time for several operator policies.
+
+    curves maps label -> (t_s (n,), eta (n,), measured (n,) bool): small markers where that policy
+    measured a new map. events: numbered grey lines with a key line, as in plot_scenario.
+    The legend gives the mean eta of each policy. Time axis in minutes.
+    """
+    fig, ax = _new_plot(title,
+                        "time (min)", "enhancement η (spot / background)")
+    for label, (t_s, eta, measured) in curves.items():
+        color = (colors or {}).get(label)
+        ax.plot(t_s / 60.0, eta, linewidth=1.5, color=color, label=f"{label}: mean η {eta.mean():.1f}")
+        if measured.any():
+            ax.plot(t_s[measured] / 60.0, eta[measured], "o", markersize=6, markerfacecolor="none",
+                    markeredgecolor=color, label=f"{label}: new map measured")
+    t_all = np.concatenate([c[0] for c in curves.values()]) / 60.0
+    ax.set_xlim(0, t_all.max())
+    ax.set_ylim(0, 1.15 * max(c[1].max() for c in curves.values()))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=10)
+    _event_lines(ax, events, key_y=-0.32, top=True)
+    return _save(fig, path)
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -494,6 +523,9 @@ if __name__ == "__main__":
                           out / "scenario.png", T_room=np.full_like(hold["t_s"], 22.0)),
             plot_cooler_power(hold["t_s"], hold["duty"] / 10.23, hold["duty"] / 10.23, [(30.0, "event")], (20.0, 40.0),
                               out / "cooler_power.png"),
+            plot_policy_comparison({"a": (t * 60, correlations["no temperature control"] * 50, t > 2),
+                                    "b": (t * 60, correlations["with temperature control"] * 50, t < 0)},
+                                   [(60.0, "event")], out / "policy_comparison.png"),
             plot_scenario_overview(hold["t_s"], hold["T_true"], hold["T_filtered"], hold["target"],
                                    np.full_like(hold["t_s"], 22.0), [(30.0, "event")], (20.0, 40.0),
                                    out / "scenario_overview.png"),
