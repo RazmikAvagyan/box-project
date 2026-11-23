@@ -4,46 +4,65 @@ thermostat.py - the temperature-controlled box and its thermostat.
 One loop step (every dt seconds):
     BME280 sensor reading z -> Kalman filter -> PID -> PWM duty -> cooler -> box temperature
 
-Box model (one temperature for the whole box, a "lumped" model):
-    C * dT/dt = G * (T_room - T) + P_internal - P_max * duty / 1023 + dP(t)
-dP(t) is a slowly varying extra heat (Ornstein-Uhlenbeck process) in the true box only;
-the Kalman filter's model (BoxModel.step) does not know it.
+Box model, two lumped temperatures: the box air T (where the sensor is) and the walls and contents T_w,
+a slower heat store that only exchanges heat with the air:
+    C   * dT/dt   = G * (T_room - T) + P_internal - P_max * u + G_w * (T_w - T) + dP(t)
+    C_w * dT_w/dt = G_w * (T - T_w)
+u is the cooling the cooler really gives (0..1): it follows duty / duty_max with a first-order lag
+of time constant tau_cooler. dP(t) is a slowly varying extra heat (Ornstein-Uhlenbeck process) in the
+true box only; the Kalman filter's model (BoxModel.step) does not know it.
 
 Sources of the numbers (see the comments in config.THERMOSTAT):
-- Thermostat document / thesis: dt (20 loops per second), 10-bit cooling-only
-  PWM, target 20 C, sensor noise and spike size, PID gains.
-- Kalman R from the sensor settings (sensor_std squared); Kalman Q_T and Q_d tuned on the simulated box;
-  the spike gate, the lockout guard and the start uncertainty of d are estimates.
-- S-2-12 cooler sheet: P_max (250 to 300 W).
-- Estimates (the cooled box itself is not described in the sources): C, G,
-  T_room, P_internal, the heat disturbance dP, and how often spikes happen.
+- Real box test 2026-11-18 (analysis/fit_real_box.py): G, P_internal, P_max, tau_cooler, C_w, G_w
+  (fitted with C fixed), the sensor noise, and the real PID gains (Kp 200, Ki 4, Kd 40).
+- Thermostat document / thesis: dt (20 loops per second, confirmed by the real test), 10-bit cooling-only
+  PWM, target 20 C, spike size.
+- Kalman Q_T and Q_d tuned on the simulated box; the spike gate, the lockout guard and the start
+  uncertainty of d are estimates.
+- Estimates: C, T_room, the heat disturbance dP, and how often spikes happen.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from config import TARGET_C
 from config import THERMOSTAT as SETTINGS
 
 
 class BoxModel:
-    """The box as one temperature: heat leaks in from the room, the optics heat it, the cooler removes heat."""
+    """The box air: heat leaks in from the room, the optics heat it, the walls and contents (T_w) exchange
+    heat with it, and the cooler removes heat with a delay (u follows the duty)."""
 
-    def __init__(self, s: dict):
-        """Store the box constants from the settings dict s."""
+    def __init__(self, s: dict, T_w: float, u: float = 0.0):
+        """Box constants from the settings dict s; start temperature T_w (C) of the walls, start cooling u (0..1)."""
         self.s = s
+        self.T_w = T_w
+        self.u = u
+
+    def a(self) -> float:
+        """dT_next / dT of one step (the model is linear in T); used by the Kalman filter."""
+        s = self.s
+        return 1.0 - (s["G"] + s["G_w"]) / s["C"] * s["dt"]
 
     def step(self, T: float, duty: int) -> float:
-        """One Euler step of length dt: new box temperature (C) for temperature T and PWM duty (0..1023)."""
+        """One Euler step of length dt: new air temperature (C) for air temperature T and PWM duty (0..1023).
+
+        Also moves the cooler state u and the wall temperature T_w on by dt.
+        """
         s = self.s
-        # Heat flow in W: leak from the warmer room + internal heat - cooler.
-        power = s["G"] * (s["T_room"] - T) + s["P_internal"] - s["P_max"] * duty / s["duty_max"]
+        # The cooler feels the duty only after a delay (first-order lag).
+        self.u += (1.0 - np.exp(-s["dt"] / s["tau_cooler"])) * (duty / s["duty_max"] - self.u)
+        # Heat flow into the air in W: leak from the room + internal heat - cooler + heat from the walls.
+        power = (s["G"] * (s["T_room"] - T) + s["P_internal"] - s["P_max"] * self.u
+                 + s["G_w"] * (self.T_w - T))
+        self.T_w += s["G_w"] * (T - self.T_w) / s["C_w"] * s["dt"]
         # The heat capacity C turns a power into a rate of temperature change.
         return T + power / s["C"] * s["dt"]
 
 
 class Sensor:
-    """BME280 temperature sensor: true temperature + Gaussian noise + rare spikes."""
+    """BME280 temperature sensor: true temperature + Gaussian noise + rare spikes, rounded to sensor_step_C."""
 
     def __init__(self, s: dict, rng: np.random.Generator):
         """Store the noise settings from s and the random generator rng."""
@@ -57,7 +76,8 @@ class Sensor:
         # Occasionally a reading jumps by 0.5 to 1.0 C (glitch), up or down.
         if self.rng.random() < s["spike_prob"]:
             z += self.rng.choice([-1.0, 1.0]) * self.rng.uniform(s["spike_min"], s["spike_max"])
-        return z
+        # The real BME280 readings come in sensor_step_C steps.
+        return round(z / s["sensor_step_C"]) * s["sensor_step_C"]
 
 
 class KalmanFilter:
@@ -84,7 +104,7 @@ class KalmanFilter:
         self.s = s
         self.box = box
         # The model is linear in T: T_next = a * T + (terms without T); b turns heat into temperature.
-        self.a = box.step(1.0, 0) - box.step(0.0, 0)
+        self.a = box.a()
         self.b = s["dt"] / s["C"]
         self.x = None
         self.d = 0.0
@@ -148,10 +168,15 @@ class KalmanFilter:
 class PID:
     """PID controller: more cooling when too warm (P), when warm for long (I), when warming fast (D)."""
 
-    def __init__(self, Kp: float, Ki: float, Kd: float, duty_max: int):
-        """Gains Kp, Ki, Kd (per loop step, source: thermostat code) and the maximum duty."""
+    def __init__(self, Kp: float, Ki: float, Kd: float, duty_max: int, freeze_when_saturated: bool = False):
+        """Gains Kp, Ki, Kd (per loop step, source: thermostat code) and the maximum duty.
+
+        freeze_when_saturated=False (the real firmware): the error sum keeps counting while the duty sits at
+        0 or duty_max, only clipped; True: conditional integration, the sum stops while saturated.
+        """
         self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
         self.duty_max = duty_max
+        self.freeze_when_saturated = freeze_when_saturated
         self.duty_last = None
         self.reset()
 
@@ -164,10 +189,10 @@ class PID:
         """Duty (0..duty_max) for the error e = T_filtered - T_target (C, positive = too warm)."""
         # Anti-windup: the sum cannot grow beyond what the integral term could ever use.
         limit = self.duty_max / self.Ki
-        # Conditional integration: while the cooler is already full on and it is still too warm (or
+        # Conditional integration (optional): while the cooler is already full on and it is still too warm (or
         # already off and still too cold), more integral cannot help, so do not let it build up.
         saturated = (self.duty_last == self.duty_max and e > 0) or (self.duty_last == 0 and e < 0)
-        if not saturated:
+        if not (self.freeze_when_saturated and saturated):
             self.sum_e = float(np.clip(self.sum_e + e, -limit, limit))
         de = 0.0 if self.e_prev is None else e - self.e_prev
         self.e_prev = e
@@ -181,18 +206,22 @@ class Thermostat:
     """The true box with its sensor, Kalman filter and PID, advanced one control loop step (dt) at a time."""
 
     def __init__(self, s: dict, seed: int, T_start: float, target: float, control: bool = True,
-                 use_kalman: bool = True):
+                 use_kalman: bool = True, T_w_start: float | None = None, u_start: float = 0.0):
         """Settings s, seed for the sensor noise (and, separately, the heat disturbance dP), start state.
 
         control=False: duty stays 0. use_kalman=False: the PID gets the raw reading.
+        T_w_start: start wall temperature (default T_start, a settled box); u_start: start cooling (0..1).
         """
         self.s = s
         # The true box gets its own copy of the settings, so a change to the real box (e.g. a
         # warmer room or a failed cooler) does not reach the Kalman filter's model.
-        self.box = BoxModel(dict(s))
+        T_w = T_start if T_w_start is None else T_w_start
+        self.box = BoxModel(dict(s), T_w, u_start)
         self.sensor = Sensor(s, np.random.default_rng(seed))
-        self.kalman = KalmanFilter(s, BoxModel(s))
-        self.pid = PID(s["Kp"], s["Ki"], s["Kd"], s["duty_max"])
+        # The Kalman filter's box model may differ from the true box (kalman_model_factors scale its settings).
+        s_kalman = {**s, **{key: s[key] * f for key, f in s["kalman_model_factors"].items()}}
+        self.kalman = KalmanFilter(s_kalman, BoxModel(s_kalman, T_w, u_start))
+        self.pid = PID(s["Kp"], s["Ki"], s["Kd"], s["duty_max"], s["freeze_integral_when_saturated"])
         self.T, self.target, self.control, self.use_kalman = T_start, target, control, use_kalman
         self.duty = 0
         self.z = self.x = None
@@ -225,6 +254,8 @@ def simulate(
     warmup_s: float = 0.0,
     use_kalman: bool = True,
     box_changes: list[tuple[float, str, float]] | None = None,
+    T_w_start: float | None = None,
+    u_start: float = 0.0,
 ) -> dict[str, np.ndarray]:
     """Simulate the box and thermostat for duration_s seconds.
 
@@ -236,6 +267,7 @@ def simulate(
     (the filter still runs, so "T_filtered" is still recorded).
     box_changes: optional list of (time_s, setting, value) changes to the true box only
     (e.g. (100, "P_max", 0.0) for a failed cooler); the Kalman model does not see them.
+    T_w_start, u_start: start wall temperature (default T_start) and start cooling (0..1), see Thermostat.
     Returns: dict of arrays (n_steps,): "t_s", "T_true", "T_raw", "T_filtered",
              "duty", "target", "sum_e" (PID error sum, to check anti-windup) and
              "skipped" (1 where the Kalman filter rejected the reading as a spike) and
@@ -243,7 +275,7 @@ def simulate(
     """
     s = SETTINGS if settings is None else settings
     n = int(round(duration_s / s["dt"]))
-    box = Thermostat(s, seed, T_start, target, control, use_kalman)
+    box = Thermostat(s, seed, T_start, target, control, use_kalman, T_w_start, u_start)
     steps = sorted(target_steps or [])
     changes = sorted(box_changes or [])
 
@@ -269,111 +301,159 @@ def simulate(
     return out
 
 
+def cooler_off_rise(s: dict, T_start: float, duration_s: float) -> float:
+    """Exact rise (C) of the air temperature after duration_s with the cooler off, from a settled box at T_start.
+
+    The two-node model without cooling is linear, x' = A x + c with x = (T, T_w), so
+    x(t) = x_eq + V exp(L t) V^-1 (x0 - x_eq) with the eigenvalues L and eigenvectors V of A.
+    """
+    A = np.array([[-(s["G"] + s["G_w"]) / s["C"], s["G_w"] / s["C"]], [s["G_w"] / s["C_w"], -s["G_w"] / s["C_w"]]])
+    c = np.array([(s["G"] * s["T_room"] + s["P_internal"]) / s["C"], 0.0])
+    x_eq = -np.linalg.solve(A, c)
+    L, V = np.linalg.eig(A)
+    x = x_eq + V @ (np.exp(L * duration_s) * np.linalg.solve(V, np.array([T_start, T_start]) - x_eq))
+    return float(x[0] - T_start)
+
+
 if __name__ == "__main__":
     from pathlib import Path
 
     from analysis import plots
+    from analysis.fit_real_box import swing
+    from config import FIT_REAL_BOX
 
     out = Path("results/thermostat")
     s = SETTINGS
+    lim, band = s["limit_C"], s["swing_band_C"]
+    swing_args = (FIT_REAL_BOX["swing_smooth_s"], FIT_REAL_BOX["swing_edge_s"], FIT_REAL_BOX["swing_band_C"])
 
-    # 1. Hold at 20 C, over the whole recorded time.
+    # 1. Hold at 20 C for 30 min (several swing periods).
     # After a 300 s warm-up the PID integral has already built up, as in a box that has been running.
-    hold = simulate(300, control=True, T_start=20.0, target=20.0, seed=0, warmup_s=300)
+    hold = simulate(1800, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300)
     T_hold = hold["T_true"]
-    dev = np.abs(T_hold - 20).max()
+    dev = np.abs(T_hold - TARGET_C).max()
+    sw = swing(hold["t_s"], T_hold, TARGET_C, *swing_args)
     print(f"hold: min {T_hold.min():.4f}, max {T_hold.max():.4f}, std {T_hold.std():.4f} C, "
-          f"max |T - 20| {dev:.4f} C (limit 0.08), mean duty {hold['duty'].mean():.0f}")
-    lim = s["limit_C"]
-    print(f"hold: share of time inside ±{lim:g} °C: {100 * np.mean(np.abs(T_hold - 20) <= lim):.0f}%")
+          f"max |T - {TARGET_C:g}| {dev:.4f} C (limit 0.5), mean duty {hold['duty'].mean():.0f}")
+    print(f"hold at 20 C: swing period {sw['period_s'] / 60:.2f} min, mean max {sw['mean_max_C']:.3f} C, "
+          f"mean min {sw['mean_min_C']:.3f} C (no limit: little cooling is needed at this operating point)")
+    print(f"hold: share of time inside ±{lim:g} °C (thesis): {100 * np.mean(np.abs(T_hold - TARGET_C) <= lim):.0f}%, "
+          f"inside ±{band:g} °C (swing band): {100 * np.mean(np.abs(T_hold - TARGET_C) <= band):.0f}%")
     print(f"Kalman: skipped {int(hold['skipped'].sum())} of {len(hold['skipped'])} readings as spikes")
-    assert dev < 0.08, "hold: deviation too large"
-    assert T_hold.std() < 0.02, "hold: temperature too unsteady"
+    # Limit 0.5 C [estimate from the real box test 2026-11-18: swing 16.25..17.00 C around 16.5 C].
+    assert dev < 0.5, "hold: deviation too large"
+
+    # 1b. The swing period at the operating point of the real hold (16.5 C target, 21 C room, after full cooling).
+    rh = s["real_hold"]
+    real = simulate(rh["duration_s"], control=True, T_start=rh["T_start"], target=rh["target"],
+                    settings={**s, "T_room": rh["T_room"]}, seed=0, T_w_start=rh["T_w_start"], u_start=rh["u_start"])
+    sw_real = swing(real["t_s"], real["T_true"], rh["target"], *swing_args)
+    print(f"hold at {rh['target']:g} C, room {rh['T_room']:g} C (real hold): swing period "
+          f"{sw_real['period_s'] / 60:.2f} min (limit {rh['period_min_s'] / 60:g}..{rh['period_max_s'] / 60:g}; "
+          f"real 5.5 min), mean max {sw_real['mean_max_C']:.3f} C, mean min {sw_real['mean_min_C']:.3f} C "
+          f"(real 17.00 / 16.25 C), mean duty {real['duty'].mean():.0f}")
+    assert rh["period_min_s"] <= sw_real["period_s"] <= rh["period_max_s"], "real hold: swing period outside the limit"
 
     # 3. Kalman filter during the hold.
     ratio = np.std(hold["T_raw"] - hold["T_true"]) / np.std(hold["T_filtered"] - hold["T_true"])
     print(f"Kalman noise reduction: std(raw - true) / std(filtered - true) = {ratio:.2f} (limit > 2.5)")
     assert ratio > 2.5, "Kalman filter reduces noise too little"
-    K_ss = KalmanFilter(s, BoxModel(s)).steady_state_gain()
+    K_ss = KalmanFilter(s, BoxModel(s, s["target"])).steady_state_gain()
     print(f"Kalman steady-state gain for T: K_ss = {K_ss:.4f} (about {1 / K_ss:.0f} readings averaged)")
     r_kalman = np.corrcoef(hold["T_filtered"], hold["T_true"])[0, 1]
     print(f"Kalman vs true (hold): correlation {r_kalman:.3f}, "
           f"error std {np.std(hold['T_filtered'] - hold['T_true']):.4f} C")
 
     # Choice of Q_T: the same hold for several Q_T, each over seeds 0..4. Best = smallest mean hold std;
-    # among Q_T within 0.0002 C of that, the one with the smallest mean max |T - 20|.
+    # among Q_T within 0.0002 C of that, the one with the smallest mean max |T - target|.
     sweep = {}
     for Q in [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]:
-        runs = [simulate(300, control=True, T_start=20.0, target=20.0, seed=seed, warmup_s=300,
+        runs = [simulate(300, control=True, T_start=TARGET_C, target=TARGET_C, seed=seed, warmup_s=300,
                          settings={**s, "Q_T": Q})["T_true"] for seed in range(5)]
-        sweep[Q] = (np.mean([T.std() for T in runs]), np.mean([np.abs(T - 20).max() for T in runs]))
+        sweep[Q] = (np.mean([T.std() for T in runs]), np.mean([np.abs(T - TARGET_C).max() for T in runs]))
         print(f"Q_T sweep (5 seeds): Q_T {Q:.0e}: mean hold std {sweep[Q][0]:.4f} C, "
-              f"mean max |T - 20| {sweep[Q][1]:.4f} C")
+              f"mean max |T - {TARGET_C:g}| {sweep[Q][1]:.4f} C")
     best_std = min(v[0] for v in sweep.values())
     Q_best = min((Q for Q, v in sweep.items() if v[0] <= best_std + 0.0002), key=lambda Q: sweep[Q][1])
     print(f"Q_T sweep: best Q_T {Q_best:.0e} (SETTINGS uses {s['Q_T']:.0e})")
 
     # Choice of Q_d: the normal hold and a hold where the room warms by 3 C at once at 150 s (a stress
     # test, no +-limit_C requirement), seeds 0..4.
-    # Best = smallest mean max |T - 20| over both tests.
+    # Best = smallest mean max |T - target| over both tests.
     warm = [(150.0, "T_room", s["T_room"] + 3.0)]
     sweep_d = {}
     for Q_d in [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]:
-        max_devs = [np.abs(simulate(300, control=True, T_start=20.0, target=20.0, seed=seed, warmup_s=300,
-                                    settings={**s, "Q_d": Q_d}, box_changes=changes)["T_true"] - 20).max()
+        max_devs = [np.abs(simulate(300, control=True, T_start=TARGET_C, target=TARGET_C, seed=seed, warmup_s=300,
+                                    settings={**s, "Q_d": Q_d}, box_changes=changes)["T_true"] - TARGET_C).max()
                     for changes in ([], warm) for seed in range(5)]
         sweep_d[Q_d] = (np.mean(max_devs[:5]), np.mean(max_devs[5:]), np.mean(max_devs))
-        print(f"Q_d sweep (5 seeds): Q_d {Q_d:.0e}: mean max |T - 20| hold {sweep_d[Q_d][0]:.4f} C, "
+        print(f"Q_d sweep (5 seeds): Q_d {Q_d:.0e}: mean max |T - {TARGET_C:g}| hold {sweep_d[Q_d][0]:.4f} C, "
               f"warm room {sweep_d[Q_d][1]:.4f} C, both {sweep_d[Q_d][2]:.4f} C")
     Q_d_best = min(sweep_d, key=lambda Q_d: sweep_d[Q_d][2])
     print(f"Q_d sweep: best Q_d {Q_d_best:.0e} (SETTINGS uses {s['Q_d']:.0e})")
 
-    # 2. Step from 21 C to 20 C.
-    step = simulate(200, control=True, T_start=21.0, target=20.0, seed=1)
-    outside = np.flatnonzero(np.abs(step["T_true"] - 20) >= 0.05)
-    settling = step["t_s"][outside[-1]] + s["dt"] if outside.size else 0.0
-    undershoot = 20 - step["T_true"].min()
-    print(f"step 21 -> 20 C: settling time {settling:.1f} s (limit 45), undershoot {undershoot:.4f} C (limit 0.05)")
-    # Limit 45 s [estimate; with conditional integration the step settles without undershoot].
-    assert settling < 45, "step: settles too slowly"
-    assert undershoot < 0.05, "step: undershoot too large"
+    # 2. Step from target + 1 C to the target, 30 min, with the real PID and with the refined PID (override only).
+    from config import PID_TUNING
+    refined = dict(zip(("Kp", "Ki", "Kd"), PID_TUNING["refined"]))
+    steps, settle = {}, {}
+    for label, gains in [(f"PID {s['Kp']:g}/{s['Ki']:g}", {}), ("PID {:g}/{:g}".format(*PID_TUNING["refined"]), refined)]:
+        run = steps[label] = simulate(1800, control=True, T_start=TARGET_C + 1.0, target=TARGET_C, seed=1, settings={**s, **gains})
+        outside = np.flatnonzero(np.abs(run["T_true"] - TARGET_C) >= band)
+        settling = settle[label] = run["t_s"][outside[-1]] + s["dt"] if outside.size else 0.0
+        print(f"step {TARGET_C + 1:g} -> {TARGET_C:g} C, {label}: inside ±{band:g} °C for good after "
+              f"{settling / 60:.1f} min (limit 10), undershoot {TARGET_C - run['T_true'].min():.3f} C")
+        # Limit 10 min [estimate: the real box cooled by 1 C in about 3 min at full power, then the swing takes over].
+        if gains:
+            assert settling <= 600, "step: not inside the swing band after 10 min"
+        elif settling > 600:
+            print(f"  expected to fail with the real {label} (swings ±0.3 C)")
+    step = steps[f"PID {s['Kp']:g}/{s['Ki']:g}"]          # the real PID, for the Kalman check below
     w = step["t_s"] <= 60.0
     print(f"Kalman vs true (cooldown 0-60 s): correlation {np.corrcoef(step['T_filtered'][w], step['T_true'][w])[0, 1]:.4f}, "
           f"error std {np.std(step['T_filtered'][w] - step['T_true'][w]):.4f} C")
 
-    # 4. Cooler off.
-    off = simulate(300, control=False, T_start=20.0, seed=2)
-    rise = off["T_true"][-1] - 20
-    print(f"cooler off for 300 s: rise {rise:.2f} C (limit 1.5..2.5)")
-    assert 1.5 < rise < 2.5, "cooler off: rise outside the expected range"
+    # 4. Cooler off, compared with the exact solution of the fitted model (no disturbance, no Euler error).
+    off = simulate(300, control=False, T_start=TARGET_C, seed=2)
+    rise = off["T_true"][-1] - TARGET_C
+    expected = cooler_off_rise(s, TARGET_C, 300)
+    print(f"cooler off for 300 s: rise {rise:.3f} C, fitted model {expected:.3f} C (room {s['T_room']:g} C, "
+          f"limit ±0.05 C)")
+    # Limit ±0.05 C [estimate: the heat disturbance changes a 300 s rise by about 0.01 C].
+    assert abs(rise - expected) < 0.05, "cooler off: rise differs from the fitted model"
 
     # 5. Anti-windup: an unreachable target must not let the error sum run away.
-    windup = simulate(120, control=True, T_start=20.0, target=5.0, seed=3)
+    windup = simulate(120, control=True, T_start=TARGET_C, target=5.0, seed=3)
     limit = s["duty_max"] / s["Ki"]
     print(f"anti-windup (target 5 C): max |sum_e| {np.abs(windup['sum_e']).max():.1f} (limit {limit:.1f})")
     assert np.abs(windup["sum_e"]).max() <= limit, "anti-windup: error sum exceeded its limit"
 
     # 6. The same hold without the Kalman filter: the PID sees the raw, noisy readings.
-    hold_raw = simulate(300, control=True, T_start=20.0, target=20.0, seed=0, warmup_s=300, use_kalman=False)
-    dev_raw = np.abs(hold_raw["T_true"] - 20)
+    hold_raw = simulate(1800, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300, use_kalman=False)
+    dev_raw = np.abs(hold_raw["T_true"] - TARGET_C)
     print(f"hold without Kalman: std {hold_raw['T_true'].std():.4f} °C, "
-          f"max |T - 20| {dev_raw.max():.4f} °C, share inside ±{lim:g} °C {100 * np.mean(dev_raw <= lim):.0f}%")
+          f"max |T - {TARGET_C:g}| {dev_raw.max():.4f} °C, share inside ±{lim:g} °C {100 * np.mean(dev_raw <= lim):.0f}%")
 
-    # 7. The cooler fails (P_max = 0) for 60 s at 100 s of a 400 s hold; the Kalman model does not know.
-    fail = simulate(400, control=True, T_start=20.0, target=20.0, seed=0, warmup_s=300,
+    # 7. The cooler fails (P_max = 0) for 60 s at 100 s of a 1200 s hold; the Kalman model does not know.
+    fail = simulate(1200, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300,
                     box_changes=[(100.0, "P_max", 0.0), (160.0, "P_max", s["P_max"])])
     after = fail["t_s"] >= 160.0
-    outside = fail["t_s"][after][np.abs(fail["T_true"][after] - 20) >= lim]
+    outside = fail["t_s"][after][np.abs(fail["T_true"][after] - TARGET_C) >= band]
     back = outside[-1] + s["dt"] - 160.0 if outside.size else 0.0
     print(f"cooler fails 100 to 160 s: max true temperature {fail['T_true'].max():.3f} C, "
           f"Kalman resets {int(fail['resets'][-1] - fail['resets'][0])}, "
-          f"back within ±{lim:g} C {back:.1f} s after the cooler returns (limit 120)")
-    assert back < 120, "cooler failure: the box does not come back in time"
+          f"back within ±{band:g} C for good {back / 60:.1f} min after the cooler returns (limit 10)")
+    # Limit 10 min [estimate: about two swing periods].
+    assert back <= 600, "cooler failure: the box does not come back in time"
 
     paths = [
         # Symlog axis: the 1 °C start and the few-millidegree wobble afterwards are both visible.
-        plots.plot_box_deviation(step["t_s"], step["T_true"], step["target"], out / "01_pid_cooldown_21_to_20C.png",
-                                 f"PID cooldown from 21 °C to 20 °C: settles in {settling:.1f} s"),
+        plots.plot_box_deviation(
+            {f"{label}: inside ±{band:g} °C for good after {settle[label] / 60:.1f} min": (r["t_s"], r["T_true"], r["target"])
+             for label, r in steps.items()},
+            out / "01_pid_cooldown_21_to_20C.png",
+            "PID cooldown to the target: real PID vs. tuned PID",
+            colors={f"{label}: inside ±{band:g} °C for good after {settle[label] / 60:.1f} min": color
+                    for label, color in zip(steps, ["black", "darkorange"])}),
         plots.plot_kalman_error(hold["t_s"], hold["T_true"], hold["T_raw"], hold["T_filtered"],
                                 out / "02_kalman_error_vs_raw_error.png"),
         plots.plot_deviation_comparison(

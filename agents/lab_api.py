@@ -9,8 +9,8 @@ box target, switch the control on or off, measure a map with GGS, check it and f
 With a LabState (state.py), every public action is also written to the lab database, together
 with a thermometer row every temperature_every_s; api.actor says who did it.
 
-The sample follows the true box temperature as in drift_test:
-X_true = lab.sample_at_temperature(X0, Y, T_true - T0, T_c), with X0 the sample at T0 = 20 C.
+The sample follows the true box temperature as in drift_test: X_true = sample.at(T_true), a
+lab.TemperatureSample that is exactly X0 at OPTICS T_ref_C (fixed; set_target never changes it).
 Row convention (as in lab.py): E_out = E_in @ X, (L x M) = (L x N) @ (N x M).
 """
 
@@ -21,7 +21,7 @@ import time
 import numpy as np
 
 from box_simulation import thermostat
-from config import DRIFT_TEST, LAB_API, STATE
+from config import BASELINE, DRIFT_TEST, LAB_API, OPTICS, STATE
 from optics_simulation import ggs, lab, metrics
 
 SETTINGS = {**DRIFT_TEST, **LAB_API}   # same lab, camera, GGS, box and sample settings as drift_test
@@ -30,10 +30,11 @@ SETTINGS = {**DRIFT_TEST, **LAB_API}   # same lab, camera, GGS, box and sample s
 class LabAPI:
     """The simulated lab behind one interface; every call adds one line to the log."""
 
-    def __init__(self, seed: int = 0, state=None, run_name: str = "run"):
+    def __init__(self, seed: int = 0, state=None, run_name: str = "run", box_settings: dict | None = None):
         """Build the lab and the box; seed shifts every seed in SETTINGS (seed=0 gives the drift_test seeds).
 
         state: optional LabState; then a run named run_name is started and every action is recorded.
+        box_settings: optional THERMOSTAT overrides for this lab only (e.g. other PID gains).
         """
         s = self.s = SETTINGS
         self.fake = lab.FakeLab(
@@ -41,13 +42,14 @@ class LabAPI:
             noise_level=s["noise_level"], bit_depth=s["bit_depth"], full_scale=s["full_scale"],
             phase_error=s["phase_error"], flicker=s["flicker"],
         )
-        self.X0 = self.fake.X_true.copy()                 # the sample at T0
-        self.Y = lab.make_transmission_matrix(s["N"], s["M"], np.random.default_rng(s["y_seed"] + seed))
+        self.X0 = self.fake.X_true.copy()                 # the sample at T_ref_C
+        self.sample = lab.TemperatureSample(self.X0, OPTICS["T_ref_C"], s["T_c"], OPTICS["T_step_C"], s["y_seed"] + seed)
         self.E_test = lab.make_slm_patterns(s["n_test"], s["N"], np.random.default_rng(s["test_seed"] + seed))
         self.ggs_rng = np.random.default_rng(s["ggs_seed"] + seed)
 
         # The box at T0, already settled by the same warm-up as drift_test, control on.
-        self.box = thermostat.Thermostat(thermostat.SETTINGS, s["box_seed"] + seed, s["T0"], s["T0"])
+        self.box = thermostat.Thermostat({**thermostat.SETTINGS, **(box_settings or {})}, s["box_seed"] + seed,
+                                         s["T0"], s["T0"])
         self.clock = 0.0
         self.events = []                                  # (time_s, function) world events, see scenario.py
         self.state = None                                 # nothing is recorded during the warm-up
@@ -75,7 +77,7 @@ class LabAPI:
             if self.state is not None and int(self.clock) % STATE["temperature_every_s"] == 0:
                 self.state.add_temperature(self.run_id, self.clock, float(self.box.x), float(self.box.z),
                                            float(self.box.target), int(self.box.duty))
-            self.fake.X_true = lab.sample_at_temperature(self.X0, self.Y, self.box.T - self.s["T0"], self.s["T_c"])
+            self.fake.X_true = self.sample.at(self.box.T)
             for event in [e for e in self.events if e[0] <= self.clock]:
                 self.events.remove(event)
                 event[1]()
@@ -200,7 +202,8 @@ if __name__ == "__main__":
     api.wait(1800)
     print("temperature after 30 min without control:", api.get_temperature())
     r2 = api.check_map()
-    print(f"check_map after 30 min without control: {r2:.3f} (expect low)")
+    print(f"check_map after 30 min without control: {r2:.3f} (limit < {BASELINE['check_threshold']:g}, "
+          f"the re-measure threshold of the rules operator)")
 
     api.set_control(True)
     api.wait(1800)
@@ -215,5 +218,7 @@ if __name__ == "__main__":
         print(f"  {line}")
 
     assert r1 > 0.8 and r3 > 0.8, "a fresh map should predict the speckle well"
-    assert r2 < 0.3, "the old map should fail after the box warmed up"
+    # Without control the box only warms toward T_room + P_internal / G (about 20.9 C), about +0.5 C in 30 min,
+    # small against T_c = 1.6 C, so the old map keeps about 0.6. It must still count as stale [estimate].
+    assert r2 < BASELINE["check_threshold"], "the old map should be stale after the box warmed up"
     print("lab_api.py self-test passed")

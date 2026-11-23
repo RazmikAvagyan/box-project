@@ -19,31 +19,42 @@ from config import MAIN as SETTINGS
 from optics_simulation import ggs, lab, metrics
 
 
-def build_lab_and_map(s: dict) -> tuple[lab.FakeLab, np.ndarray, np.ndarray, np.ndarray, dict, float]:
-    """Build the fake lab from settings s, measure L patterns and recover the map with GGS.
-
-    Returns: fake (FakeLab), E_in (L, N), I (L, M), X_est (N, M), GGS info dict, GGS run time in s.
-    """
-    # 1. The fake lab: a random scattering sample, an imperfect SLM and laser, a realistic camera.
-    fake = lab.FakeLab(
+def build_lab(s: dict) -> lab.FakeLab:
+    """The fake lab from settings s: a random scattering sample, an imperfect SLM and laser, a realistic camera."""
+    return lab.FakeLab(
         N=s["N"], M=s["M"], seed=s["seed"],
         noise_level=s["noise_level"], bit_depth=s["bit_depth"], full_scale=s["full_scale"],
         phase_error=s["phase_error"], flicker=s["flicker"],
     )
 
-    # 2. Show L random patterns on the SLM and take a camera photo of each.
+
+def measure_map(fake: lab.FakeLab, s: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, float]:
+    """Measure L patterns on the current sample and recover the map with GGS.
+
+    Returns: E_in (L, N), I (L, M), X_est (N, M), GGS info dict, GGS run time in s.
+    """
+    # Show L random patterns on the SLM and take a camera photo of each.
     E_in = fake.patterns(s["L_ratio"] * s["N"])        # (L x N)
     I = fake.measure(E_in)                             # (L x M)
     A = lab.amplitude(I)                               # GGS works with amplitudes
 
-    # 3. Recover the transmission matrix from patterns and photos only.
+    # Recover the transmission matrix from patterns and photos only.
     t0 = time.perf_counter()
     X_est, info = ggs.recover(
         E_in, A, np.random.default_rng(s["ggs_seed"]),
         max_iter=s["max_iter"], tol=s["tol"],
         n_restarts=s["n_restarts"], restart_threshold=s["restart_threshold"],
     )
-    return fake, E_in, I, X_est, info, time.perf_counter() - t0
+    return E_in, I, X_est, info, time.perf_counter() - t0
+
+
+def build_lab_and_map(s: dict) -> tuple[lab.FakeLab, np.ndarray, np.ndarray, np.ndarray, dict, float]:
+    """Build the fake lab from settings s, measure L patterns and recover the map with GGS.
+
+    Returns: fake (FakeLab), E_in (L, N), I (L, M), X_est (N, M), GGS info dict, GGS run time in s.
+    """
+    fake = build_lab(s)
+    return (fake, *measure_map(fake, s))
 
 
 def main() -> dict:

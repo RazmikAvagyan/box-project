@@ -5,7 +5,7 @@ run(policy) plays the 2-hour scenario (scenario.add_events) through LabAPI and t
 photo every step_s. Two policies:
 - "never": only focuses, with the one map measured at the start.
 - "rules": every check_every_s it checks the map and measures a new one if check_map is below
-  check_threshold; if the Kalman temperature stays more than limit_C from the target for longer
+  check_threshold; if the Kalman temperature stays more than swing_band_C from the target for longer
   than warn_after_s, it writes one warning line to the log (the rules cannot fix the box).
 The policy only uses LabAPI; the true temperature is recorded for the plot and the summary only.
 """
@@ -23,16 +23,17 @@ from config import DRIFT_TEST, SCENARIO, STATE, THERMOSTAT
 POLICIES = ("never", "rules")
 
 
-def run(policy: str, seed: int = 0, state=None) -> dict:
+def run(policy: str, seed: int = 0, state=None, box_settings: dict | None = None) -> dict:
     """Play the scenario with one policy; returns per-step arrays and the API (for its log).
 
     state: optional LabState; the run is recorded there under the policy name (actor = policy).
+    box_settings: optional THERMOSTAT overrides for this run (see LabAPI).
 
     Returns: dict with arrays (n_steps,) "t_s", "eta", "kalman", "T_true", "target", "measured", "checked",
              plus "lab_time_s" (lab time spent in measure_map and check_map), "warnings" and "api".
     """
     s = SETTINGS
-    api = LabAPI(seed=seed, state=state, run_name=policy)
+    api = LabAPI(seed=seed, state=state, run_name=policy, box_settings=box_settings)
     api.actor = policy
     scenario.add_events(api)
     api.measure_map()
@@ -58,7 +59,7 @@ def run(policy: str, seed: int = 0, state=None) -> dict:
                     measured = True
                 lab_time += api.clock - t0
                 last_check = api.clock
-            if abs(reading["kalman"] - reading["target"]) > THERMOSTAT["limit_C"]:
+            if abs(reading["kalman"] - reading["target"]) > THERMOSTAT["swing_band_C"]:
                 out_since = t_step if out_since is None else out_since
                 if not warned and t_step - out_since > s["warn_after_s"]:
                     api.note(f"box {reading['kalman'] - reading['target']:+.3f} C from target "
@@ -88,10 +89,10 @@ def scenario_events() -> list[tuple[float, str]]:
 
 
 def summarize(r: dict) -> dict:
-    """Summary of one run: eta statistics, map calls, lab time on them, warnings and badly timed new maps."""
-    lim = THERMOSTAT["limit_C"]
-    # A new map taken while the box is not at its target goes stale as soon as the box settles.
-    useless = int(np.sum(r["measured"] & (np.abs(r["kalman"] - r["target"]) > lim)))
+    """Summary of one run: eta statistics, map calls, lab time on them, warnings, badly timed new maps, and the
+    share of steps with the true temperature within +-limit_C of the target (the thesis requirement)."""
+    # A new map taken while the box is outside its swing band goes stale as soon as the box settles.
+    useless = int(np.sum(r["measured"] & (np.abs(r["kalman"] - r["target"]) > THERMOSTAT["swing_band_C"])))
     return {
         "mean_eta": float(r["eta"].mean()),
         "min_eta": float(r["eta"].min()),
@@ -101,6 +102,7 @@ def summarize(r: dict) -> dict:
         "lab_time_on_maps_s": float(r["lab_time_s"]),
         "warnings": int(r["warnings"]),
         "maps_while_box_off_target": useless,
+        "share_within_limit": float(np.mean(np.abs(r["T_true"] - r["target"]) <= THERMOSTAT["limit_C"])),
     }
 
 

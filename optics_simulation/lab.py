@@ -208,28 +208,52 @@ def drift_step(X: np.ndarray, a: float, rng: np.random.Generator) -> np.ndarray:
     return np.sqrt(1.0 - a**2) * X + a * Y
 
 
-def sample_at_temperature(X0: np.ndarray, Y: np.ndarray, delta_T: float, T_c: float) -> np.ndarray:
-    """The sample's transmission matrix at temperature T = T0 + delta_T.
+class TemperatureSample:
+    """The sample's transmission matrix at any temperature T (C); exactly X0 at T_ref.
 
-    c = exp(-|delta_T| / T_c),  X = c * X0 + sqrt(1 - c^2) * Y
-
-    Input: X0 (N, M), the sample at the reference temperature T0.
-           Y (N, M), ONE fixed random matrix from make_transmission_matrix,
-               reused for every temperature.
-           delta_T: T - T0 in degrees C; T_c: correlation temperature in degrees C.
-    Returns: X, shape (N, M), complex128.
-
-    Unlike drift_step, the result depends only on the distance from T0: if the
-    temperature comes back, the speckle comes back too. The field correlation
-    with X0 is c, so the speckle intensity correlation is about
-    c^2 = exp(-2 |delta_T| / T_c). This is a simple model, not measured on our
-    sample; T_c is set by hand (source: thesis drift curve).
+    The similarity of two temperatures depends only on their difference:
+    field correlation corr(X(T1), X(T2)) = exp(-|T1 - T2| / T_c).
+    Built as an AR(1) chain on the grid T_k = T_ref + k * step, outward from X_0 = X0 in both directions:
+    X_k = rho * X_(k-1) + sqrt(1 - rho^2) * Y_k (k > 0; k < 0 uses X_(k+1)), rho = exp(-step / T_c).
+    Going up and going down from T_ref therefore give different samples, and the sample comes back
+    only if the temperature comes back to the same value. Y_k has its own seed (seed, k), so the chain is
+    the same whatever order the grid is extended in. The grid grows lazily to any temperature asked for.
+    Between grid points: linear interpolation, rescaled so that E[|X_nm|^2] stays 1.
+    T_c is set by hand (source: thesis drift curve); the model is not measured on our sample.
     """
-    # Parts expand with temperature (10 cm of aluminium grows ~2.3 um per degree C,
-    # about 4 wavelengths), so the light paths change smoothly with |delta_T|.
-    c = np.exp(-abs(delta_T) / T_c)
-    # c^2 + (1 - c^2) = 1, so E[|X_nm|^2] stays 1.
-    return c * X0 + np.sqrt(1.0 - c**2) * Y
+
+    def __init__(self, X0: np.ndarray, T_ref: float, T_c: float, step: float, seed: int):
+        """X0 (N, M): the sample at T_ref (C); T_c: correlation temperature (C); step: grid step (C)."""
+        self.T_ref, self.step, self.seed = T_ref, step, seed
+        self.rho = np.exp(-step / T_c)
+        self.grid = {0: X0.copy()}
+        self.k_min = self.k_max = 0
+
+    def _extend(self, k: int) -> None:
+        """Build the chain out to grid index k."""
+        N, M = self.grid[0].shape
+        a = np.sqrt(1.0 - self.rho ** 2)
+        while self.k_max < k:
+            self.k_max += 1
+            Y = make_transmission_matrix(N, M, np.random.default_rng([self.seed, 0, self.k_max]))
+            self.grid[self.k_max] = self.rho * self.grid[self.k_max - 1] + a * Y
+        while self.k_min > k:
+            self.k_min -= 1
+            Y = make_transmission_matrix(N, M, np.random.default_rng([self.seed, 1, -self.k_min]))
+            self.grid[self.k_min] = self.rho * self.grid[self.k_min + 1] + a * Y
+
+    def at(self, T: float) -> np.ndarray:
+        """The sample at temperature T (C). Returns: X, shape (N, M), complex128 (a new array)."""
+        x = (T - self.T_ref) / self.step
+        k = int(np.floor(x))
+        w = x - k
+        self._extend(k)
+        if w == 0.0:
+            return self.grid[k].copy()
+        self._extend(k + 1)
+        # Neighbours have E[<X_k, X_k+1>] = rho per entry, so this keeps E[|X_nm|^2] = 1.
+        norm = np.sqrt((1 - w) ** 2 + w ** 2 + 2 * w * (1 - w) * self.rho)
+        return ((1 - w) * self.grid[k] + w * self.grid[k + 1]) / norm
 
 
 def column_correlation(X_a: np.ndarray, X_b: np.ndarray) -> np.ndarray:
@@ -377,14 +401,36 @@ if __name__ == "__main__":
     assert all(np.diff(corr_history) < 0), "correlation did not decrease steadily"
     assert X.shape == X0.shape
 
-    # Temperature model: exactly X0 at delta_T = 0; field correlation exp(-1) at delta_T = T_c.
-    T_c = 1.6
-    Y_temp = make_transmission_matrix(N, M, np.random.default_rng(9))
-    assert np.array_equal(sample_at_temperature(X0, Y_temp, 0.0, T_c), X0), "delta_T = 0 does not give X0"
-    corr_Tc = column_correlation(X0, sample_at_temperature(X0, Y_temp, T_c, T_c)).mean()
-    print(f"sample_at_temperature: delta_T = T_c gives mean column correlation {corr_Tc:.4f} "
-          f"(expected {np.exp(-1):.4f} +- 0.05)")
-    assert abs(corr_Tc - np.exp(-1)) < 0.05, "temperature model correlation is wrong"
+    # Temperature model: exactly X0 at T_ref; the correlation depends only on the temperature difference.
+    from config import DRIFT_TEST, OPTICS
+    T_c, T_ref = DRIFT_TEST["T_c"], OPTICS["T_ref_C"]
+    sample = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9)
+    assert np.array_equal(sample.at(T_ref), X0), "T_ref does not give X0"
+
+    def corr(T1: float, T2: float) -> float:
+        """Mean column correlation of the sample at T1 and T2."""
+        return float(column_correlation(sample.at(T1), sample.at(T2)).mean())
+
+    pairs = [(19.6, 20.4), (20.0, 20.4), (20.4, 20.8), (19.6, 19.2), (20.013, 20.413), (T_ref, T_ref + T_c)]
+    c = {pair: corr(*pair) for pair in pairs}
+    for (T1, T2), value in c.items():
+        print(f"TemperatureSample: corr({T1:g}, {T2:g}) = {value:.4f} (theory exp(-{abs(T2 - T1):g}/{T_c:g}) = "
+              f"{np.exp(-abs(T2 - T1) / T_c):.4f})")
+    same_gap = [c[(20.0, 20.4)], c[(20.4, 20.8)], c[(19.6, 19.2)], c[(20.013, 20.413)]]
+    assert max(same_gap) - min(same_gap) < 0.05, "equal differences do not give equal correlation"
+    assert c[(19.6, 20.4)] < c[(20.0, 20.4)] - 0.1, "19.6 vs 20.4 is not clearly lower than 20.0 vs 20.4"
+    assert abs(c[(T_ref, T_ref + T_c)] - np.exp(-1)) < 0.05, "corr at a difference of T_c is not exp(-1)"
+    # Up and down from T_ref are different samples (the old model gave the same one).
+    assert corr(T_ref - 0.4, T_ref + 0.4) < 0.7, "up and down from T_ref give the same sample"
+    X_far, X_cold = sample.at(30.0), sample.at(5.0)
+    print(f"TemperatureSample: 30 C and 5 C work (grid {sample.T_ref + sample.k_min * sample.step:.2f} .. "
+          f"{sample.T_ref + sample.k_max * sample.step:.2f} C, {len(sample.grid)} points), "
+          f"mean |X|^2 at 30 C {np.mean(np.abs(X_far) ** 2):.3f}, corr(20, 30) {corr(20.0, 30.0):.3f}")
+    assert X_far.shape == X0.shape and abs(np.mean(np.abs(X_cold) ** 2) - 1) < 0.1
+    # The same chain whatever order the grid is built in.
+    other = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9)
+    assert np.allclose(other.at(19.6), sample.at(19.6)) and np.allclose(other.at(20.4), sample.at(20.4))
+    print("TemperatureSample: equal differences give equal correlation, up != down, any temperature: OK")
 
     # Imperfections are random but still reproducible with the same seed.
     imperfect = [FakeLab(N=N, M=M, seed=0, phase_error=0.3, flicker=0.05) for _ in range(2)]

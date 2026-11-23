@@ -19,7 +19,7 @@ matplotlib.use("Agg")   # files only, no windows; also works without a display
 import matplotlib.pyplot as plt
 import numpy as np
 
-from config import THERMOSTAT
+from config import TARGET_C, THERMOSTAT
 
 FIGSIZE = (10, 5)       # inches, the same for every figure
 GRID_ALPHA = 0.3
@@ -174,17 +174,23 @@ def plot_correlation_vs_time(
     path: str | Path,
     title: str = "Correlation over time",
     colors: dict[str, str] | None = None,
+    styles: dict[str, str] | None = None,
 ) -> Path:
-    """Correlation curves against time t (T,) in minutes; curves maps label -> r (T,).
+    """Correlation curves against time t (T,) in minutes; curves maps label -> r (T,); optional colour and
+    line style per label.
 
-    Fixed y-range 0 to 1. The legend shows start -> end and the minimum of each curve.
+    Fixed y-range 0 to 1. The legend shows start -> end and the minimum of each curve (below the plot for
+    more than four curves).
     """
     fig, ax = _new_plot(title, "time (min)", "prediction correlation r (1 = perfect)")
     for label, r in curves.items():
         ax.plot(t, r, marker="o", markersize=4, color=(colors or {}).get(label),
-                label=f"{label}: {r[0]:.3f} -> {r[-1]:.3f}, min {r.min():.3f}")
+                linestyle=(styles or {}).get(label, "-"), label=f"{label}: {r[0]:.3f} -> {r[-1]:.3f}, min {r.min():.3f}")
     ax.set_ylim(0, 1)
-    ax.legend(loc="best")
+    if len(curves) > 4:
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, fontsize=10)
+    else:
+        ax.legend(loc="best")
     return _save(fig, path)
 
 
@@ -198,12 +204,14 @@ def plot_correlation_and_temperature(
     color: str,
     right_label: str,
     right_ylim: tuple[float, float] | None = None,
+    limit: float | None = None,
 ) -> Path:
     """Correlation and temperature over time on two y-axes (time in minutes).
 
     Left axis: correlation r (T,) at the photo times t (T,), as a line with dots, 0 to 1.
     Right axis: a temperature curve y_curve (n,) over t_curve (n,), e.g. ΔT in °C or the
     deviation from the target in °C (right_label says which), as a grey dashed line. One legend for both.
+    limit: optional, thin grey dotted lines at +-limit (°C) on the right axis, in the legend.
     """
     fig, ax = _new_plot(title, "time (min)", "prediction correlation r")
     line_r, = ax.plot(t, r, marker="o", markersize=4, color=color,
@@ -220,36 +228,46 @@ def plot_correlation_and_temperature(
         ax_T.set_ylim(*right_ylim)
     else:
         _y_range(ax_T, y_curve, min_span=0.1)
-    ax.legend([line_r, line_T], [line_r.get_label(), line_T.get_label()], loc="best")
+    lines = [line_r, line_T]
+    if limit is not None:
+        line_lim = ax_T.axhline(limit, linestyle=":", linewidth=0.8, color="gray", label=f"limit ±{limit:g} °C")
+        ax_T.axhline(-limit, linestyle=":", linewidth=0.8, color="gray")
+        lines.append(line_lim)
+    ax.legend(lines, [line.get_label() for line in lines], loc="best")
     return _save(fig, path)
 
 
 def plot_box_deviation(
-    t_s: np.ndarray,
-    T_true: np.ndarray,
-    target: np.ndarray,
+    curves: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     path: str | Path,
     title: str,
+    colors: dict[str, str] | None = None,
     t_from: float = 0.0,
 ) -> Path:
-    """Deviation (T_true - target) in °C over time t_s in seconds, from t_from on, with the +-0.03 °C limit.
+    """Deviation (T_true - target) in °C over time, from t_from on, with the +-0.03 °C limit;
+    curves maps legend label -> (t_s (n,), T_true (n,), target (n,)), times in seconds.
 
     Symlog axis, linear within +-0.03 °C and logarithmic beyond, so a 1 °C step and the
-    few-millidegree wobble after it are both visible; y from -0.06 to 1.2 °C.
+    few-millidegree wobble after it are both visible; y from the data (1.2 x the lowest and highest
+    deviation of all curves, at least +-2 x LIMIT_C), so every curve shows on both sides.
     """
-    keep = t_s >= t_from
-    t, dev = t_s[keep], T_true[keep] - target[keep]
     fig, ax = _new_plot(title, "time (s)", f"distance from target (°C, log scale above {LIMIT_C:g})")
     ax.axhline(0.0, linewidth=0.8, color="black")
-    ax.plot(t, dev, linewidth=2.0, color="black", label="true temperature")
+    devs = []
+    for label, (t_s, T_true, target) in curves.items():
+        keep = t_s >= t_from
+        devs.append(T_true[keep] - target[keep])
+        ax.plot(t_s[keep], devs[-1], linewidth=2.0, color=(colors or {}).get(label, "black"), label=label)
     ax.axhline(LIMIT_C, linestyle="--", color="green", label=f"limit ±{LIMIT_C:g} °C")
     ax.axhline(-LIMIT_C, linestyle="--", color="green")
     ax.set_yscale("symlog", linthresh=LIMIT_C, linscale=1.5)
-    ax.set_ylim(-0.06, 1.2)
-    ticks = [-0.03, -0.01, 0, 0.01, 0.03, 0.1, 0.3, 1]
+    dev = np.concatenate(devs)
+    bottom, top = min(-2 * LIMIT_C, 1.2 * dev.min()), max(2 * LIMIT_C, 1.2 * dev.max())
+    ax.set_ylim(bottom, top)
+    ticks = [v for v in [-1, -0.3, -0.1, -0.03, -0.01, 0, 0.01, 0.03, 0.1, 0.3, 1] if bottom <= v <= top]
     ax.set_yticks(ticks)
     ax.set_yticklabels([f"{v:g}" for v in ticks])
-    ax.legend(loc="upper right")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), fontsize=10)
     return _save(fig, path)
 
 
@@ -320,7 +338,13 @@ def plot_deviation_comparison(
 
 def _event_lines(ax: plt.Axes, events: list[tuple[float, str]], key_y: float, top: bool = False) -> None:
     """Grey vertical lines at the event times (s, x axis in minutes), numbered 1, 2, ... at the bottom
-    (or at the top if top=True), and one key line 'number label, ...' in grey at axes height key_y."""
+    (or at the top if top=True), and one key line 'number label, ...' in grey at axes height key_y, or lower
+    if the legend reaches below that, so the legend never covers the key line (savefig's tight box adds the space)."""
+    legend = ax.get_legend()
+    if legend is not None:
+        ax.figure.canvas.draw()
+        box = legend.get_window_extent().transformed(ax.transAxes.inverted())
+        key_y = min(key_y, box.y0 - 0.03)
     for number, (t_event, _) in enumerate(events, start=1):
         ax.axvline(t_event / 60.0, linewidth=1.0, color="gray")
         # A small number at the bottom or top of each line (y in axes coordinates).
@@ -464,6 +488,221 @@ def plot_policy_comparison(
     return _save(fig, path)
 
 
+def plot_real_box_test(
+    t_s: np.ndarray,
+    T_box: np.ndarray,
+    target: np.ndarray,
+    T_room: np.ndarray,
+    T_probe: np.ndarray,
+    power_pct: np.ndarray,
+    path: str | Path,
+    title: str = "Real box test",
+) -> Path:
+    """Logged real box: box temperature, target, room temperature (dashed) and room probe (dotted),
+    all (n,) in °C over t_s (n,) in seconds (axis in minutes); cooler power (n,) in % on a second axis.
+
+    Room values may be NaN (failed reads). Grey vertical lines at each target change.
+    """
+    fig, ax = _new_plot(title, "time (min)", "temperature (°C)")
+    t = t_s / 60.0
+    ax.plot(t, T_box, linewidth=1.5, color="black", label="box temperature")
+    ax.plot(t, target, linewidth=1.2, color="green", label="target")
+    ax.plot(t, T_room, linestyle="--", linewidth=1.5, color="tab:orange", label="room (next to box)")
+    ax.plot(t, T_probe, linestyle=":", linewidth=2.0, color="tab:red", label="room probe (far side)")
+    for i in np.flatnonzero(np.diff(target) != 0) + 1:
+        ax.axvline(t[i], linewidth=1.0, color="gray")
+        ax.text(t[i], 0.98, f" {target[i - 1]:g} → {target[i]:g} °C", va="top", ha="left", fontsize=9,
+                color="gray", transform=ax.get_xaxis_transform())
+    _y_range(ax, *[a[np.isfinite(a)] for a in (T_box, target, T_room, T_probe)], min_span=1.0, margin=0.1)
+    ax.set_xlim(t[0], t[-1])
+    ax2 = ax.twinx()
+    ax2.plot(t, power_pct, linewidth=1.0, color="tab:blue", alpha=0.6, label="cooler power")
+    ax2.set_ylabel("cooler power (% of full PWM)", color="tab:blue")
+    ax2.set_ylim(0, 105)
+    lines = ax.get_legend_handles_labels()
+    lines2 = ax2.get_legend_handles_labels()
+    ax.legend(lines[0] + lines2[0], lines[1] + lines2[1], loc="upper center", bbox_to_anchor=(0.5, -0.15),
+              ncol=5, fontsize=10)
+    return _save(fig, path)
+
+
+def _phase_spans(ax: plt.Axes, spans: list[tuple[float, float, str]], label: bool = True) -> None:
+    """Grey lines at the phase starts (x in minutes) and the phase names at the top; the hold is shaded."""
+    for start, end, name in spans:
+        ax.axvline(start, linewidth=1.0, color="gray")
+        if name == "hold":
+            ax.axvspan(start, end, color="gray", alpha=0.12)
+        if label:
+            ax.text((start + end) / 2, 0.98, name + (" (not fitted)" if name == "hold" else ""), ha="center",
+                    va="top", fontsize=10, color="gray", transform=ax.get_xaxis_transform())
+
+
+def plot_fit_overview(
+    t_min: np.ndarray,
+    T_meas: np.ndarray,
+    T_fit: np.ndarray,
+    duty_pct: np.ndarray,
+    u_pct: np.ndarray,
+    spans: list[tuple[float, float, str]],
+    path: str | Path,
+    title: str,
+) -> Path:
+    """Measured (raw) and fitted box temperature (n,) in °C over t_min (n,) in minutes; below, on its own axes,
+    the cooler power (n,) in %: duty sent by the PID and the lagged cooling the box feels (fitted).
+    spans: (start_min, end_min, name) of the phases; the hold is shaded.
+    """
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(FIGSIZE[0], 7), sharex=True, height_ratios=[3, 1])
+    ax.set_title(title)
+    ax.plot(t_min, T_meas, linewidth=1.0, color="black", label="measured (raw sensor)")
+    ax.plot(t_min, T_fit, linewidth=1.5, linestyle="--", color="tab:orange", label="fitted model (real duty and room as input)")
+    ax.set_ylabel("box temperature (°C)")
+    ax.grid(alpha=GRID_ALPHA)
+    ax.legend(loc="lower left", fontsize=10)
+    _phase_spans(ax, spans)
+    ax2.plot(t_min, duty_pct, linewidth=1.0, color="tab:blue", label="duty sent (PWM)")
+    ax2.plot(t_min, u_pct, linewidth=1.5, linestyle="--", color="darkblue", label="cooling felt (fitted lag)")
+    ax2.set_ylim(0, 105)
+    ax2.set_xlabel("time since the rest phase started (min)")
+    ax2.set_ylabel("cooler (%)")
+    ax2.grid(alpha=GRID_ALPHA)
+    ax2.legend(loc="center right", fontsize=9)
+    _phase_spans(ax2, spans, label=False)
+    ax.set_xlim(t_min[0], t_min[-1])
+    return _save(fig, path)
+
+
+def plot_fit_error(
+    t_min: np.ndarray,
+    errors: dict[str, np.ndarray],
+    spans: list[tuple[float, float, str]],
+    path: str | Path,
+    title: str,
+) -> Path:
+    """Fit error model - measured (n,) in °C of each model in errors over t_min (n,) in minutes; the label
+    shows the RMS outside the hold. spans: phases as in plot_fit_overview."""
+    fig, ax = _new_plot(title, "time since the rest phase started (min)", "model - measured (°C)")
+    fitted = np.ones(len(t_min), bool)
+    for start, end, name in spans:
+        if name == "hold":
+            fitted &= (t_min < start) | (t_min > end)
+    colors = ["tab:red", "tab:purple", "black"]
+    for (label, err), color in zip(errors.items(), colors):
+        ax.plot(t_min, err, linewidth=1.5 if color == "black" else 1.0, color=color,
+                label=f"{label} (RMS {np.sqrt(np.mean(err[fitted] ** 2)):.3f} °C outside the hold)")
+    ax.axhline(0.0, linewidth=0.8, color="gray")
+    _phase_spans(ax, spans)
+    ax.set_xlim(t_min[0], t_min[-1])
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=1, fontsize=10)
+    return _save(fig, path)
+
+
+def plot_hold_swing(
+    t_meas_min: np.ndarray,
+    T_meas: np.ndarray,
+    t_sim_min: np.ndarray,
+    T_sim: np.ndarray,
+    target: float,
+    path: str | Path,
+    title: str,
+) -> Path:
+    """PID hold: measured temperature T_meas (n,) over t_meas_min (n,) and simulated box temperature T_sim (m,) over
+    t_sim_min (m,), both in °C and minutes since the hold started, with the target."""
+    fig, ax = _new_plot(title, "time since the hold started (min)", "box temperature (°C)")
+    ax.plot(t_sim_min, T_sim, linewidth=1.5, linestyle="--", color="tab:orange",
+            label="simulated (fitted box + PID + Kalman)")
+    ax.plot(t_meas_min, T_meas, linewidth=1.5, color="black", label="measured (real box)")
+    ax.axhline(target, linestyle="--", linewidth=1.2, color="green", label=f"target {target:g} °C")
+    ax.set_xlim(0, max(t_meas_min[-1], t_sim_min[-1]))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=10)
+    return _save(fig, path)
+
+
+def plot_temperature_and_duty(
+    curves: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    target: tuple[np.ndarray, np.ndarray],
+    path: str | Path,
+    title: str,
+    colors: dict[str, str] | None = None,
+) -> Path:
+    """Box temperature (top) and cooler duty (bottom, own axes) over time for several runs.
+
+    curves: label -> (t_min (n,), T (n,) in °C, duty_pct (n,) in % of full PWM); target: (t_min (m,), target (m,) in °C).
+    """
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(FIGSIZE[0], 7), sharex=True, height_ratios=[3, 1])
+    ax.set_title(title)
+    styles = ["-", "--", ":"]
+    for (label, (t, T, duty)), style in zip(curves.items(), styles):
+        color = None if colors is None else colors.get(label)
+        ax.plot(t, T, linestyle=style, linewidth=1.5, color=color, label=label)
+        ax2.plot(t, duty, linestyle=style, linewidth=1.0, color=color, label=label)
+    ax.plot(*target, linestyle="--", linewidth=1.0, color="green", label="target")
+    ax.set_ylabel("box temperature (°C)")
+    ax.grid(alpha=GRID_ALPHA)
+    ax.legend(loc="upper right", fontsize=10)
+    ax2.set_ylim(0, 105)
+    ax2.set_xlabel("time (min)")
+    ax2.set_ylabel("duty (%)")
+    ax2.grid(alpha=GRID_ALPHA)
+    ax.set_xlim(min(c[0][0] for c in curves.values()), max(c[0][-1] for c in curves.values()))
+    return _save(fig, path)
+
+
+def plot_score_map(
+    Kp: np.ndarray,
+    Ki: np.ndarray,
+    score: np.ndarray,
+    point: tuple[float, float],
+    point_label: str,
+    path: str | Path,
+    title: str,
+) -> Path:
+    """Heat map of a score (nKi, nKp) in °C over the grid Kp (nKp,) and Ki (nKi,), both log axes, log colour
+    scale (darker = lower = better), with one point (Kp, Ki) marked."""
+    fig, ax = _new_plot(title, "Kp", "Ki")
+    # Cell edges halfway (in log) between the grid values.
+    edges = lambda v: np.exp(np.concatenate([[1.5 * np.log(v[0]) - 0.5 * np.log(v[1])],
+                                             (np.log(v[:-1]) + np.log(v[1:])) / 2,
+                                             [1.5 * np.log(v[-1]) - 0.5 * np.log(v[-2])]]))
+    mesh = ax.pcolormesh(edges(Kp), edges(Ki), score, cmap="Blues_r",
+                         norm=matplotlib.colors.LogNorm(vmin=score.min(), vmax=score.max()))
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    # The axes always include the marked point (10 % margin), also when it lies beyond the last cell.
+    ax.set_xlim(min(edges(Kp)[0], point[0] / 1.1), max(edges(Kp)[-1], point[0] * 1.1))
+    ax.set_ylim(min(edges(Ki)[0], point[1] / 1.1), max(edges(Ki)[-1], point[1] * 1.1))
+    ax.set_xticks(Kp)
+    ax.set_xticklabels([f"{v:g}" for v in Kp], fontsize=9)
+    ax.set_yticks(Ki)
+    ax.set_yticklabels([f"{v:g}" for v in Ki], fontsize=9)
+    ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+    ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+    ax.grid(False)
+    fig.colorbar(mesh, ax=ax, label="grid score (°C)")
+    ax.plot(*point, marker="x", markersize=12, markeredgewidth=3, color="tab:red", linestyle="none", label=point_label)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), fontsize=10)
+    return _save(fig, path)
+
+
+def plot_operator_comparison(
+    operators: list[str],
+    groups: dict[str, tuple[np.ndarray, np.ndarray]],
+    path: str | Path,
+    title: str,
+    ylabel: str,
+) -> Path:
+    """Grouped bars: one group per operator, one bar per entry of groups, label -> (mean (n_ops,), error (n_ops,));
+    the error bars are given by the caller (e.g. std over seeds)."""
+    fig, ax = _new_plot(title, "operator", ylabel)
+    x = np.arange(len(operators))
+    width = 0.8 / len(groups)
+    for i, (label, (mean, err)) in enumerate(groups.items()):
+        ax.bar(x + (i - (len(groups) - 1) / 2) * width, mean, width, yerr=err, capsize=4, label=label)
+    ax.set_xticks(x)
+    ax.set_xticklabels(operators)
+    ax.legend()
+    return _save(fig, path)
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -494,9 +733,9 @@ if __name__ == "__main__":
             r.append(metrics.prediction_correlation(E_test, X_est, lab.measure(E_test, X)))
         correlations[label] = np.array(r)
 
-    hold = thermostat.simulate(60, control=True, T_start=20.0, target=20.0, seed=0, warmup_s=60)
-    off = thermostat.simulate(60, control=False, T_start=20.0, seed=0)
-    step = thermostat.simulate(60, control=True, T_start=21.0, target=20.0, seed=1)
+    hold = thermostat.simulate(60, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=60)
+    off = thermostat.simulate(60, control=False, T_start=TARGET_C, seed=0)
+    step = thermostat.simulate(60, control=True, T_start=TARGET_C + 1.0, target=TARGET_C, seed=1)
     colors = {"no temperature control": "red", "with temperature control": "blue"}
 
     # Test plots go into a temporary folder that is deleted at the end.
@@ -509,14 +748,17 @@ if __name__ == "__main__":
             plot_focus_grid({"case A": (I_focus, I_random), "case B": (I_focus, I_focus)},
                             {"case A": (50.0, 1.0), "case B": (50.0, 50.0)}, shape, 27, out / "focus_grid.png"),
             plot_correlation_vs_time(t, correlations, out / "correlation.png", colors=colors),
+            plot_correlation_vs_time(t, {f"{k} {i}": v for i in range(3) for k, v in correlations.items()},
+                                     out / "correlation_many.png", styles={"no temperature control 1": "--"}),
             plot_correlation_and_temperature(t, correlations["no temperature control"], off["t_s"] / 60,
                                              off["T_true"] - off["T_true"][0], out / "correlation_and_temperature.png",
                                              "Correlation and temperature", "red", "ΔT (°C)"),
             plot_correlation_and_temperature(t, correlations["with temperature control"], hold["t_s"] / 60,
-                                             hold["T_true"] - 20.0, out / "correlation_and_deviation.png",
-                                             "Correlation and deviation", "blue", "distance from 20 °C (°C)",
+                                             hold["T_true"] - TARGET_C, out / "correlation_and_deviation.png",
+                                             "Correlation and deviation", "blue", f"distance from {TARGET_C:g} °C (°C)",
                                              right_ylim=(-0.045, 0.045)),
-            plot_box_deviation(step["t_s"], step["T_true"], step["target"], out / "box_step_deviation.png",
+            plot_box_deviation({"step": (step["t_s"], step["T_true"], step["target"]),
+                                "hold": (hold["t_s"], hold["T_true"], hold["target"])}, out / "box_step_deviation.png",
                                "Step deviation"),
             plot_kalman_error(hold["t_s"], hold["T_true"], hold["T_raw"], hold["T_filtered"], out / "kalman_error.png"),
             plot_scenario(hold["t_s"], hold["T_true"], hold["T_filtered"], hold["target"], [(30.0, "event")],
@@ -532,6 +774,24 @@ if __name__ == "__main__":
             plot_deviation_comparison(hold["t_s"], {"a": (hold["T_true"], hold["target"]),
                                                     "b": (off["T_true"], off["target"])},
                                       out / "deviation_comparison.png", "Comparison"),
+            plot_real_box_test(hold["t_s"], hold["T_filtered"], np.where(hold["t_s"] < 30, TARGET_C, TARGET_C + 0.5),
+                               np.full_like(hold["t_s"], 22.0), np.full_like(hold["t_s"], np.nan),
+                               hold["duty"] / 10.23, out / "real_box_test.png"),
+            plot_fit_overview(hold["t_s"] / 60, hold["T_raw"], hold["T_true"], hold["duty"] / 10.23, hold["duty"] / 10.23,
+                              [(0.0, 2.0, "rest"), (2.0, 4.0, "hold")], out / "fit_overview.png", "Fit"),
+            plot_fit_error(hold["t_s"] / 60, {"a": hold["T_raw"] - hold["T_true"]}, [(2.0, 4.0, "hold")],
+                           out / "fit_error.png", "Fit error"),
+            plot_hold_swing(hold["t_s"] / 60, hold["T_raw"], step["t_s"] / 60, step["T_true"], TARGET_C,
+                            out / "hold_swing.png", "Hold swing"),
+            plot_temperature_and_duty({"a": (hold["t_s"] / 60, hold["T_true"], hold["duty"] / 10.23),
+                                       "b": (step["t_s"] / 60, step["T_true"], step["duty"] / 10.23)},
+                                      (hold["t_s"] / 60, hold["target"]), out / "temperature_and_duty.png", "T and duty"),
+            plot_operator_comparison(["a", "b"], {"x": (np.array([40.0, 50.0]), np.array([2.0, 3.0])),
+                                                  "y": (np.array([45.0, 52.0]), np.array([1.0, 2.0]))},
+                                     out / "operator_comparison.png", "Operators", "mean η"),
+            plot_score_map(np.array([100.0, 200.0, 400.0]), np.array([0.1, 1.0]),
+                           np.array([[0.1, 0.05, 0.02], [0.2, 0.1, 0.01]]), (300.0, 0.5), "point",
+                           out / "score_map.png", "Score map"),
         ]
         for p in paths:
             assert p.exists() and p.stat().st_size > 0, f"{p.name} is missing or empty"

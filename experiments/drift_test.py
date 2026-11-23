@@ -1,13 +1,14 @@
 """
 drift_test.py - does the map still work while the temperature changes?
 
-The map X_est is measured once at t = 0, then for 5 minutes the same test
-patterns are shown and the camera photos are compared with what X_est predicts.
+In each case the map X_est is measured at t = 0 (at the box temperature then), then for 5 minutes
+the same test patterns are shown and the camera photos are compared with what X_est predicts.
 Two cases, both from the box simulation (box_simulation.thermostat): without
 temperature control (the cooler is off and the box warms up) and with
 temperature control (PID + Kalman thermostat, already settled by a warm-up).
 
-The sample at temperature T is lab.sample_at_temperature(X0, Y, T - T(t=0), T_c).
+The sample at temperature T is sample.at(T), a lab.TemperatureSample that is exactly X0 at
+OPTICS T_ref_C; the similarity of two temperatures depends only on their difference.
 Row convention (as in lab.py): E_out = E_in @ X, (L x M) = (L x N) @ (N x M).
 """
 
@@ -21,6 +22,7 @@ import numpy as np
 from analysis import plots
 from box_simulation import thermostat
 from config import DRIFT_TEST as SETTINGS
+from config import OPTICS
 from experiments import main
 from optics_simulation import lab, metrics
 
@@ -28,13 +30,15 @@ CASES = {"no control": "no control (cooler off)", "with control": "with PID + Ka
 COLORS = {"no control (cooler off)": "red", "with PID + Kalman control": "blue"}
 
 
-def box_runs(s: dict) -> dict[str, dict[str, np.ndarray]]:
-    """Box simulation (20 Hz) for both cases; each value is the dict from thermostat.simulate."""
+def box_runs(s: dict, box_settings: dict | None = None) -> dict[str, dict[str, np.ndarray]]:
+    """Box simulation (20 Hz) for both cases; each value is the dict from thermostat.simulate.
+    box_settings: optional THERMOSTAT overrides (e.g. other PID gains)."""
     duration_s = s["duration_min"] * 60
+    box = {**thermostat.SETTINGS, **(box_settings or {})}
     return {
-        "no control": thermostat.simulate(duration_s, control=False, T_start=s["T0"], seed=s["box_seed"]),
+        "no control": thermostat.simulate(duration_s, control=False, T_start=s["T0"], seed=s["box_seed"], settings=box),
         "with control": thermostat.simulate(duration_s, control=True, T_start=s["T0"], target=s["T0"],
-                                            warmup_s=s["warmup_s"], seed=s["box_seed"]),
+                                            warmup_s=s["warmup_s"], seed=s["box_seed"], settings=box),
     }
 
 
@@ -48,15 +52,13 @@ def at_photo_times(run: dict[str, np.ndarray], t_min: np.ndarray) -> np.ndarray:
 def run_case(
     fake: lab.FakeLab,
     X_est: np.ndarray,
-    X0: np.ndarray,
-    Y: np.ndarray,
+    sample: lab.TemperatureSample,
     temperatures: np.ndarray,
     E_test: np.ndarray,
     s: dict,
 ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray], tuple[float, float]]:
-    """Follow the sample through one temperature curve (T,) with the fixed map X_est (N, M).
-
-    The sample changes with T - temperatures[0]: the map was measured at t = 0.
+    """Follow the sample through one temperature curve (T,) with the fixed map X_est (N, M), measured at
+    temperatures[0]; the sample is sample.at(T).
     Returns: prediction correlation (T,), output correlation vs a reference photo
              at t = 0 (T,), the focus photos (M,) at the first and the last time point,
              and the background level (mean intensity of the test photos) at those two times.
@@ -66,7 +68,7 @@ def run_case(
     # temperature. Comparing with it (not with the t = 0 photo itself) shows the
     # real photo-to-photo agreement, limited by fresh SLM error, flicker and noise.
     # It uses its own random generator, so all other photos stay exactly the same.
-    fake.X_true = lab.sample_at_temperature(X0, Y, 0.0, s["T_c"])
+    fake.X_true = sample.at(T_map)
     rng, fake.rng = fake.rng, np.random.default_rng(s["ref_seed"])
     I_ref = fake.measure(E_test)
     fake.rng = rng
@@ -76,7 +78,7 @@ def run_case(
     focus, background = [], []
     for i, T in enumerate(temperatures):
         # The real sample changes with temperature; the map does not.
-        fake.X_true = lab.sample_at_temperature(X0, Y, T - T_map, s["T_c"])
+        fake.X_true = sample.at(T)
         I_test = fake.measure(E_test)
         r_pred[i] = metrics.prediction_correlation(E_test, X_est, I_test)
         r_out[i] = metrics.output_correlation(I_test, I_ref)
@@ -90,28 +92,31 @@ def run_case(
     return r_pred, r_out, (focus[0], focus[1]), (background[0], background[1])
 
 
-def main_drift() -> dict:
-    """Run the drift test with SETTINGS; save plots and data; return the summary dict."""
-    s = SETTINGS
+def main_drift(s: dict = SETTINGS, box_settings: dict | None = None) -> tuple[dict, dict]:
+    """Run the drift test with settings s (and THERMOSTAT overrides box_settings); save plots and data in s["out_dir"].
+
+    Returns: the summary dict and the prediction correlations {case: (T,)}.
+    """
     out = Path(s["out_dir"])
 
-    # 1. Same fake lab and GGS as main.py; the map is measured once, at t = 0.
-    fake, _, _, X_est, _, _ = main.build_lab_and_map(s)
-
-    # 2. Temperature model and fixed test patterns.
+    # 1.-2. Same fake lab as main.py, the temperature model and fixed test patterns.
+    fake = main.build_lab(s)
     X0 = fake.X_true.copy()
-    Y = lab.make_transmission_matrix(s["N"], s["M"], np.random.default_rng(s["y_seed"]))
+    sample = lab.TemperatureSample(X0, OPTICS["T_ref_C"], s["T_c"], OPTICS["T_step_C"], s["y_seed"])
     E_test = lab.make_slm_patterns(s["n_test"], s["N"], np.random.default_rng(s["test_seed"]))
 
     # Box temperatures from the thermostat simulation, read at each photo time.
     t = np.arange(0, s["duration_min"] * 60 + s["dt_s"] / 2, s["dt_s"]) / 60.0   # minutes
-    runs = box_runs(s)
+    runs = box_runs(s, box_settings)
     temps = {case: at_photo_times(runs[case], t) for case in CASES}
 
     # 3.-4. Follow both cases over time.
     r_pred, r_out, focus, eta = {}, {}, {}, {}
     for case in CASES:
-        r_pred[case], r_out[case], focus[case], bg = run_case(fake, X_est, X0, Y, temps[case], E_test, s)
+        # Same GGS as main.py; the map is measured at t = 0 of this case, at the box temperature then.
+        fake.X_true = sample.at(temps[case][0])
+        X_est = main.measure_map(fake, s)[2]
+        r_pred[case], r_out[case], focus[case], bg = run_case(fake, X_est, sample, temps[case], E_test, s)
         # Enhancement of each focus photo: target intensity / background.
         eta[case] = tuple(I[s["focus_target"]] / b for I, b in zip(focus[case], bg))
 
@@ -138,10 +143,12 @@ def main_drift() -> dict:
         plots.plot_correlation_and_temperature(
             t, r_pred["with control"], run_on["t_s"] / 60.0, run_on["T_true"] - s["T0"],
             out / "04_pid_control_temperature_and_accuracy.png",
-            f"With PID + Kalman control: the box stays at {s['T0']:g} °C and the map stays accurate\n"
+            f"With PID + Kalman control: box temperature and map accuracy\n"
             f"max |T - {s['T0']:g}| {np.abs(run_on['T_true'] - s['T0']).max():.4f} °C "
             f"(limit ±{plots.LIMIT_C:g} °C)", COLORS[CASES["with control"]],
-            f"distance from {s['T0']:g} °C (°C)", right_ylim=(-0.045, 0.045)),
+            f"distance from {s['T0']:g} °C (°C)",
+            right_ylim=(-1.1 * np.abs(run_on["T_true"] - s["T0"]).max(), 1.1 * np.abs(run_on["T_true"] - s["T0"]).max()),
+            limit=plots.LIMIT_C),
     ]
 
     # 7. Data.
@@ -178,15 +185,101 @@ def main_drift() -> dict:
     print(f"Saved in {out}/:")
     for p in saved:
         print(f"  {p}")
+    return summary, r_pred
 
+
+def long_test(s: dict = SETTINGS) -> dict[tuple[str, float], dict]:
+    """Long test: long_min minutes, one map at t = 0, for no control, the real PID and the tuned PID, in each room
+    of PID_TUNING["holds"] (T_room as a THERMOSTAT override). Saves 05_long_test_map_accuracy.png in s["out_dir"].
+
+    Returns: {(case, room C): {"r": prediction correlation (T,), "T_range": max - min of the true box temperature}}.
+    """
+    from config import PID_TUNING, THERMOSTAT
+
+    fake = main.build_lab(s)
+    sample = lab.TemperatureSample(fake.X_true.copy(), OPTICS["T_ref_C"], s["T_c"], OPTICS["T_step_C"], s["y_seed"])
+    E_test = lab.make_slm_patterns(s["n_test"], s["N"], np.random.default_rng(s["test_seed"]))
+    duration_s = s["long_min"] * 60
+    t = np.arange(0, duration_s + s["long_dt_s"] / 2, s["long_dt_s"]) / 60.0          # minutes
+    cases = {"no control": None, f"PID {THERMOSTAT['Kp']:g}/{THERMOSTAT['Ki']:g}": {},
+             "PID {:g}/{:g} (tuned)".format(*PID_TUNING["refined"]): dict(zip(("Kp", "Ki", "Kd"), PID_TUNING["refined"]))}
+    out = {}
+    for _, room in PID_TUNING["holds"]:
+        for case, gains in cases.items():
+            box = {**thermostat.SETTINGS, "T_room": room, **(gains or {})}
+            if gains is None:
+                run = thermostat.simulate(duration_s, control=False, T_start=s["T0"], seed=s["box_seed"], settings=box)
+            else:
+                run = thermostat.simulate(duration_s, control=True, T_start=s["T0"], target=s["T0"],
+                                          warmup_s=s["long_warmup_s"], seed=s["box_seed"], settings=box)
+            temps = at_photo_times(run, t)
+            fake.X_true = sample.at(temps[0])
+            X_est = main.measure_map(fake, s)[2]
+            r = run_case(fake, X_est, sample, temps, E_test, s)[0]
+            out[(case, room)] = {"r": r, "T_range": float(run["T_true"].max() - run["T_true"].min())}
+            print(f"long test, room {room:g} C, {case:22}: r {r[0]:.3f} -> {r[-1]:.3f} (min {r.min():.3f}), "
+                  f"box range {out[(case, room)]['T_range']:.3f} C")
+    colors = dict(zip(cases, ["red", "blue", "green"]))
+    rooms = [room for _, room in PID_TUNING["holds"]]
+    label = lambda case, room: f"{case}, room {room:g} °C"
+    print(plots.plot_correlation_vs_time(
+        t, {label(c, room): v["r"] for (c, room), v in out.items()}, Path(s["out_dir"]) / "05_long_test_map_accuracy.png",
+        title=f"Map measured once at t = 0: accuracy over {s['long_min']:g} minutes (target {s['T0']:g} °C)",
+        colors={label(c, room): colors[c] for c, room in out},
+        styles={label(c, room): "-" if room == rooms[0] else "--" for c, room in out}))
+    return out
+
+
+def check(r_pred: dict) -> list[str]:
+    """The drift test requirements on the prediction correlations {case: (T,)}. The start range and "no control
+    ends lower" are asserted; returns the failed limits that depend on the PID (min > 0.75, end > 0.80 with control)."""
     for case in CASES:
         assert 0.80 < r_pred[case][0] < 0.95, f"{case}: start {r_pred[case][0]:.3f} not in (0.80, 0.95)"
-    assert r_pred["no control"][-1] < 0.15, f"no control: end {r_pred['no control'][-1]:.3f} >= 0.15"
-    assert r_pred["with control"].min() > 0.75, f"with control: min {r_pred['with control'].min():.3f} <= 0.75"
-    assert r_pred["with control"][-1] > 0.80, f"with control: end {r_pred['with control'][-1]:.3f} <= 0.80"
-    print("drift_test.py finished")
-    return summary
+    # The fitted box warms only about 0.2 C in 5 min without the cooler, so the map stays fairly good;
+    # it must still end worse than with control [estimate].
+    print(f"end of the test: no control {r_pred['no control'][-1]:.3f}, with control {r_pred['with control'][-1]:.3f} "
+          f"(no control must end lower)")
+    assert r_pred["no control"][-1] < r_pred["with control"][-1], "no control does not end lower than with control"
+    r = r_pred["with control"]
+    return ([f"with control: min {r.min():.3f} <= 0.75"] if r.min() <= 0.75 else []) + \
+        ([f"with control: end {r[-1]:.3f} <= 0.80"] if r[-1] <= 0.80 else [])
 
 
 if __name__ == "__main__":
-    main_drift()
+    import tempfile
+
+    from config import PID_TUNING, THERMOSTAT
+
+    real = f"PID {THERMOSTAT['Kp']:g}/{THERMOSTAT['Ki']:g}"
+    tuned = "PID {:g}/{:g}".format(*PID_TUNING["refined"])
+    pids = {real: None, tuned: dict(zip(("Kp", "Ki", "Kd"), PID_TUNING["refined"]))}
+    # Default settings write results/drift_test/; the other runs go to a temporary folder. The 19 C runs check
+    # another target (above about 20.9 C the box settles without cooling and the PID would do nothing);
+    # T_ref_C stays at its config value.
+    r = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for target in (SETTINGS["T0"], 19.0):
+            for pid, box in pids.items():
+                default = target == SETTINGS["T0"] and box is None
+                print(f"\n{pid}, target {target:g} C (T_ref_C {OPTICS['T_ref_C']:g} C):")
+                s = SETTINGS if default else {**SETTINGS, "T0": target, "out_dir": str(Path(tmp) / f"{pid}_{target}")}
+                r[(pid, target)] = main_drift(s, box)[1]
+    print()
+    for (pid, target), rp in r.items():
+        failed = check(rp)
+        print(f"{pid}, {target:g} C: " + "; ".join(
+            f"{CASES[c]} start {rp[c][0]:.3f} end {rp[c][-1]:.3f} min {rp[c].min():.3f}" for c in CASES))
+        if pid == tuned:
+            assert not failed, f"{pid}, {target:g} C: " + "; ".join(failed)
+        elif failed:
+            print(f"  {'; '.join(failed)}: expected to fail with the real {pid} (swings ±0.3 C)")
+
+    print(f"\nLong test ({SETTINGS['long_min']:g} min, map measured once at t = 0):")
+    long = long_test()
+    warm = max(room for _, room in PID_TUNING["holds"])
+    end_tuned = long[(f"{tuned} (tuned)", warm)]["r"][-1]
+    end_off = long[("no control", warm)]["r"][-1]
+    print(f"room {warm:g} C: end correlation tuned PID {end_tuned:.3f}, no control {end_off:.3f} "
+          f"(tuned must be at least {SETTINGS['long_margin']:g} higher)")
+    assert end_tuned > end_off + SETTINGS["long_margin"], "long test: tuned PID not clearly better than no control"
+    print("drift_test.py finished")
