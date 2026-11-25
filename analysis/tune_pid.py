@@ -232,12 +232,12 @@ def main(s: dict = SETTINGS) -> list[dict]:
     score_map = np.array([[grid_score[(float(kp), float(ki), Kd)] for kp in s["Kp"]] for ki in s["Ki"]])
     paths = [
         plots.plot_temperature_and_duty(
-            curves, (first["t_s"] / 60.0, first["target"]), out / "03_case_d_start_like_test3.png",
+            curves, (first["t_s"] / 60.0, first["target"]), out / "01_case_d_start_like_test3.png",
             f"Case d (box {s['d_T_start']:g} °C, cooler off, target {s['target']:g} °C, room {s['d_room_C']:g} °C): "
             f"refined vs. test 3 PID",
             colors=dict(zip(curves, ["tab:blue", "tab:orange", "black"]))),
         plots.plot_score_map(np.array(s["Kp"], float), np.array(s["Ki"], float), score_map, refined[:2],
-                             f"refined: Kp {refined[0]:g}, Ki {refined[1]:g}", out / "04_grid_score_heat_map.png",
+                             f"refined: Kp {refined[0]:g}, Ki {refined[1]:g}", out / "02_grid_score_heat_map.png",
                              f"PID grid score (worse RMS of cases a and b + cooler term, Kd {Kd:g})"),
     ]
     for path in [*paths, out / "results.csv"]:
