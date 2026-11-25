@@ -61,10 +61,13 @@ if __name__ == "__main__":
 
     from agents.lab_api import LabAPI
     from analysis import plots
-    from config import THERMOSTAT
+    from box_simulation.thermostat import pid_gains, pid_label
+    from config import PLOTS, THERMOSTAT
 
     s = SETTINGS
-    api = LabAPI(seed=0)
+    main_pid = PLOTS["main_pid"]
+    note = f"\n{pid_label(main_pid)}, seed 0"
+    api = LabAPI(seed=0, box_settings=pid_gains(main_pid))
     add_events(api)
 
     # No operator: only time passes. Record every 10 s (the true temperature only for this test).
@@ -118,12 +121,20 @@ if __name__ == "__main__":
               (s["cooler_fail_at_s"], "cooler fails"), (fail_end, "cooler back"),
               (s["target_change_at_s"], f"target {s['new_target_C']:g} °C")]
     out = Path("results/scenario")
-    print(plots.plot_scenario_overview(t, T_true, T_kalman, target, T_room, events,
-                                       (s["cooler_fail_at_s"], fail_end), out / "01_box_and_room_temperature_overview.png"))
-    print(plots.plot_scenario(t, T_true, T_kalman, target, events, out / "02_box_temperature_zoom_near_target.png",
-                              T_room=T_room))
+    # The messages of the Temperature agent come from a team run of the same seed and PID (the agents do not change
+    # the box, so its temperatures are the ones above).
+    from agents import loop
+    team = loop.run_team(seed=0, box_settings=pid_gains(main_pid), brain="rules", switches={"use_analyst": False})
+    places = []
+    print(plots.plot_scenario(t, T_true, T_kalman, target, T_room, events, out / "01_box_and_room_temperature.png",
+                              PLOTS["scenario_range_C"],
+                              f"Box and room temperature during the 2-hour scenario\n{pid_label(main_pid)}, seed 0",
+                              broken=(s["cooler_fail_at_s"], fail_end),
+                              messages=[(m["t_s"], m["topic"]) for m in team["messages"]], places_out=places))
+    for topic, minutes, row, start, end in places:
+        print(f"message label {topic!r}: triangle {minutes:.1f} min, row {row}, text {start:.1f} to {end:.1f} min")
     # The duty the PID asks for, and the cooling the box really gets (0 while the cooler is broken).
     asked = duty / THERMOSTAT["duty_max"] * 100
     real = asked * P_max / THERMOSTAT["P_max"]
     print(plots.plot_cooler_power(t, asked, real, events, (s["cooler_fail_at_s"], fail_end),
-                                  out / "03_cooler_power_during_scenario.png"))
+                                  out / "02_cooler_power_during_scenario.png", note))

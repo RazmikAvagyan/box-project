@@ -28,7 +28,7 @@
     "ggs_iterations": 373,
     "converged": true,
     "restarted_columns": 2,
-    "run_time_s": 1.25952761300141,
+    "run_time_s": 1.0815702480031177,
     "corr_mean": 0.9788613734465615,
     "corr_min": 0.968612489048546,
     "prediction_correlation": 0.8742235184051473,

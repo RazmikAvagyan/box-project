@@ -10,6 +10,10 @@ TARGET_C = 20.0                    # box target [source: thesis]
 
 OPTICS = {
     "focus_n_background": 200,     # random patterns for the unfocused background level (metrics.focus_test)
+    # Slow change of the sample with time (min), on top of the temperature: corr ~ exp(-|dt| / tau). None = off
+    # (the sample then depends only on the temperature and comes back exactly when the temperature comes back).
+    "time_drift_tau_min": None,    # [estimate: not measured on our sample]
+    "time_drift_step_s": 10,       # s, time grid of the phase random walk (interpolated in between) [estimate]
     # The sample is exactly X0 at T_ref_C. A property of the sample, not of the box: set_target() never changes it.
     "T_ref_C": TARGET_C,           # C [estimate: the sample is first mapped at the thesis target]
     "T_step_C": 0.02,              # C, grid step of the temperature chain (lab.TemperatureSample); rho = 0.9876
@@ -142,6 +146,9 @@ AGENT_LOOP = {
     "use_prediction": True,        # predict.py may skip check_map when the predicted check is clearly good
     # Stale relative to what a fresh map reaches now (off: stale = check < BASELINE check_threshold, as before).
     "use_fresh_level": True,
+    "use_messages": True,          # the Map agent reads the Temperature agent's messages (team.py); off = it ignores them
+    "use_analyst": True,           # data_analyst.py analyses the lab database at the end of loop.run / loop.run_team
+    "analyst_max_tool_calls": 8,   # the analyst's AI may call at most this many analysis tools per run [estimate]
     "fresh_n": 3,                  # fresh level = median verify check of the last fresh_n new maps [estimate]
     "stale_share": 0.9,            # stale if check < stale_share * fresh level [estimate]
     "min_gain": 0.03,              # a new map must verify this much better than the check before it [estimate]
@@ -176,6 +183,29 @@ PREDICTION = {
     "max_bad": 2,                  # after this many bad predictions, always check for the rest of the run [estimate]
 }
 
+ANALYST = {
+    "min_period_s": 10,            # s, periods outside the swing band shorter than this are not listed [estimate]
+    "focus_window_s": 180,         # s, mean focus brightness this long before and after a new map (3 photos) [estimate]
+    "se_factor": 2.0,              # a difference between groups of runs is real only beyond this many standard errors
+    "out_dir": "results/analysis", # <run name>.json and <run name>.md
+    "max_tokens": 4000,            # the analyst's AI answer length limit (many findings); the Map agent keeps AI_BRAIN's [estimate]
+    "timeout_s": 60,               # s, one analyst AI call (longer prompts with tool results) [estimate]
+    # Self-test tolerances [estimate]
+    "test_tc_rel_tol": 0.3,        # fitted T_c (exponential intensity model) within 30 % of the lab model's T_c
+    "test_event_tol_s": 180,       # events found within 3 min of when the scenario made them
+}
+
+SCIENTIST = {
+    "max_questions": 4,            # open questions the brain may pick [estimate]
+    "max_experiments": 3,          # new simulation experiments per report [estimate]
+    "max_seeds": 10,               # seeds per experiment (more are cut) [estimate]
+    "max_compute_min": 40,         # min of wall time for all experiments together [estimate]
+    "est_min_per_run": 0.1,        # min of wall time per scenario run in the pool [source: results/compare/results.txt, 100 runs in 403 s]
+    "max_tokens": 4000,            # the Scientist's AI answer length limit [estimate]
+    "timeout_s": 60,               # s, one Scientist AI call [estimate]
+    "out_dir": "results/report",
+}
+
 AI_BRAIN = {
     "provider": "fake",            # "claude" | "gemini" | "openai" | "fake" (no network) | "rules"
     "test_provider": "claude",     # real provider the agents.loop self-test also runs when its key is found
@@ -195,10 +225,28 @@ AI_BRAIN = {
     "max_wait_total_s": 300,       # s, all waits in one plan together [estimate]
 }
 
+PLOTS = {
+    # The PID most plots use: a key of PID_TUNING ("refined" = 3000/0.36, "first_search" = 800/0.5). Plots that
+    # compare PIDs show it next to THERMOSTAT's PID (200/4, the real box today). THERMOSTAT itself is not changed.
+    "main_pid": "refined",
+    "pid_notes": {"real": "real box today", "refined": "tuned in simulation", "first_search": "first search, real test 3"},
+    "moving_average_s": 300,       # s, focus plots: the main line is this moving average [estimate: 5 min]
+    "scenario_range_C": (19.5, 24.8),   # C, scenario temperature plot: fixed range that shows box, target and room [estimate]
+    "scenario_message_y_C": 24.6,  # C, scenario plot: the Temperature agent's messages are marked at this height [estimate]
+    "scenario_label_step_C": 0.25, # C, ... a label that would overlap an earlier one goes one row (this much) lower [estimate]
+    "scenario_label_pad_min": 0.3,    # min, padding added to each label's measured width [estimate]
+    "scenario_label_gap_min": 1.2,    # min, gap between a triangle centre and its label on the same row (the marker is about 1 min wide) [estimate]
+    "kalman_window_s": 60,         # s, Kalman plot: cooler duty shown in one window of this length [estimate]
+    "duty_working_pct": 5.0,       # %, ... where the Kalman duty stays above this (the cooler is working) [estimate]
+}
+
 COMPARE = {
     "seeds": list(range(10)),      # full run (python -m experiments.compare full): every seed of LabAPI
     "test_seeds": [0, 1],          # self-test (python -m experiments.compare)
-    "operators": ["never", "rules", "basic", "full"],   # basic / full Map agent: rules brain, fresh level on
+    "operators": ["never", "rules", "basic", "full", "team"],   # basic / full Map agent: rules brain, fresh level on;
+                                                                  # team: Temperature agent + full Map agent (team.py)
+    "time_drift_taus": [None, 120, 30],   # min, the full run is repeated for each (None = no time drift of the sample) [estimate]
+    "after_cooler_s": 600,         # s, "mean eta after the cooler is back" is taken over this time [estimate: 10 min]
     "se_factor": 2.0,              # a difference is real only if |mean paired difference| > this many standard errors
     "out_dir": "results/compare",
 }
@@ -255,6 +303,7 @@ PID_TUNING = {
     "compare": [(800.0, 0.5, 40.0), (200.0, 4.0, 40.0)],   # PIDs of the real tests [source: real box tests 2026-11-18]
     # "What if" PID for the agents.loop self-test only; THERMOSTAT keeps the gains the real box runs today.
     "refined": (3000.0, 0.36, 40.0),   # [source: results/real_box/pid_tuning/results.csv, row "refined"]
+    "first_search": (800.0, 0.5, 40.0),   # best of the first grid search, run on the real box in test 3 [source: PID_TUNING compare, real box test 2026-11-18]
     # Hold cases, each duration_s after warmup_s at 20 C: (name, room C) [source: real box test 2026-11-18, 20 C hold; estimate: warm room 20.8 + 3]
     "holds": [("a", 21.1), ("b", 23.8)],
     "target": TARGET_C,                # C

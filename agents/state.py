@@ -12,6 +12,8 @@ Tables (all rows carry run_id and the lab time t_s in seconds):
   focus:        run_id, t_s, point, eta
   actions:      run_id, t_s, actor, action, args (JSON), result (JSON)
   notes:        run_id, t_s, actor, level ("info" or "warning"), text
+  messages:     run_id, t_s, sender, receiver, topic (one of TOPICS), text
+  findings:     run_id, kind, text, value, unit, evidence (JSON) - written by the data analyst only
 
 Export one run as CSV files: python -m agents.state export <run name>  (writes results/export/<run name>/)
 """
@@ -26,7 +28,9 @@ from pathlib import Path
 
 from config import STATE
 
-TABLES = ["temperatures", "maps", "focus", "actions", "notes"]
+TABLES = ["temperatures", "maps", "focus", "actions", "notes", "messages", "findings"]
+# Message topics between the agents (the Temperature agent sends them, the Map agent reads them).
+TOPICS = ("box unstable", "box stable again", "target changed", "cooler problem")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, seed INTEGER,
@@ -37,6 +41,8 @@ CREATE TABLE IF NOT EXISTS maps (run_id INTEGER, t_s REAL, kind TEXT, correlatio
 CREATE TABLE IF NOT EXISTS focus (run_id INTEGER, t_s REAL, point INTEGER, eta REAL);
 CREATE TABLE IF NOT EXISTS actions (run_id INTEGER, t_s REAL, actor TEXT, action TEXT, args TEXT, result TEXT);
 CREATE TABLE IF NOT EXISTS notes (run_id INTEGER, t_s REAL, actor TEXT, level TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS messages (run_id INTEGER, t_s REAL, sender TEXT, receiver TEXT, topic TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS findings (run_id INTEGER, kind TEXT, text TEXT, value REAL, unit TEXT, evidence TEXT);
 """
 
 
@@ -60,7 +66,7 @@ class LabState:
     def delete_runs(self, name: str) -> None:
         """Delete every run with this name and all its rows in the other tables, then commit."""
         ids = [(row["id"],) for row in self.query("SELECT id FROM runs WHERE name = ?", (name,))]
-        for table in ["temperatures", "maps", "focus", "actions", "notes"]:
+        for table in TABLES:
             self.db.executemany(f"DELETE FROM {table} WHERE run_id = ?", ids)
         self.db.execute("DELETE FROM runs WHERE name = ?", (name,))
         self.db.commit()
@@ -85,6 +91,26 @@ class LabState:
     def add_note(self, run_id: int, t_s: float, actor: str, level: str, text: str) -> None:
         """One note: level "info" or "warning"."""
         self.db.execute("INSERT INTO notes VALUES (?, ?, ?, ?, ?)", (run_id, t_s, actor, level, text))
+
+    def add_message(self, run_id: int, t_s: float, sender: str, receiver: str, topic: str, text: str) -> None:
+        """One message between agents; topic is one of TOPICS."""
+        self.db.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)", (run_id, t_s, sender, receiver, topic, text))
+
+    def unread(self, run_id: int, receiver: str, since: float) -> list[dict]:
+        """Messages to receiver sent after lab time `since` (exclusive), oldest first."""
+        return self.query("SELECT * FROM messages WHERE run_id = ? AND receiver = ? AND t_s > ? ORDER BY t_s, rowid",
+                          (run_id, receiver, since))
+
+    def add_finding(self, run_id: int, finding: dict) -> None:
+        """One finding of the data analyst (kind, text, value, unit, evidence)."""
+        self.db.execute("INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?)",
+                        (run_id, finding["kind"], finding["text"], finding["value"], finding["unit"],
+                         json.dumps(finding["evidence"])))
+
+    def findings(self, run_id: int) -> list[dict]:
+        """The findings of one run, in the order they were written (evidence decoded)."""
+        rows = self.query("SELECT kind, text, value, unit, evidence FROM findings WHERE run_id = ? ORDER BY rowid", (run_id,))
+        return [{**row, "evidence": json.loads(row["evidence"])} for row in rows]
 
     def commit(self) -> None:
         """Write the pending rows to the file."""
@@ -119,7 +145,8 @@ class LabState:
         folder.mkdir(parents=True, exist_ok=True)
         counts = {}
         for table in TABLES:
-            cur = self.db.execute(f"SELECT * FROM {table} WHERE run_id = ? ORDER BY t_s, rowid", (run_id,))
+            order = "rowid" if table == "findings" else "t_s, rowid"      # findings have no lab time
+            cur = self.db.execute(f"SELECT * FROM {table} WHERE run_id = ? ORDER BY {order}", (run_id,))
             rows = cur.fetchall()
             with open(folder / f"{table}.csv", "w", newline="") as f:
                 writer = csv.writer(f)
@@ -158,7 +185,7 @@ if __name__ == "__main__":
             summary = baseline.summarize(r)
             run_id = r["api"].run_id
 
-            for table in ["runs", "temperatures", "maps", "focus", "actions", "notes"]:
+            for table in ["runs", *TABLES]:
                 print(f"{table}: {state.query(f'SELECT COUNT(*) AS n FROM {table}')[0]['n']} rows")
             measures = state.query("SELECT * FROM maps WHERE run_id = ? AND kind = 'measure'", (run_id,))
             checks = state.query("SELECT * FROM maps WHERE run_id = ? AND kind = 'check'", (run_id,))
@@ -177,5 +204,14 @@ if __name__ == "__main__":
                   f"check rows {len(checks)} = check_map_calls {summary['check_map_calls']}")
             assert len(measures) == summary["measure_map_calls"] + 1, "measure rows do not match the baseline"
             assert len(checks) == summary["check_map_calls"], "check rows do not match the baseline"
+
+            # Messages: written, read back only for the receiver, and only after `since`.
+            state.add_message(run_id, 100.0, "temperature_agent", "map_agent", "box unstable", "test")
+            state.add_message(run_id, 200.0, "temperature_agent", "map_agent", "box stable again", "test")
+            state.add_message(run_id, 200.0, "temperature_agent", "user", "target changed", "test")
+            assert [m["topic"] for m in state.unread(run_id, "map_agent", 0.0)] == ["box unstable", "box stable again"]
+            assert [m["topic"] for m in state.unread(run_id, "map_agent", 100.0)] == ["box stable again"]
+            assert state.unread(run_id, "map_agent", 200.0) == []
+            print("messages: add_message / unread by receiver and time: ok")
             state.close()
         print("state.py self-test passed")

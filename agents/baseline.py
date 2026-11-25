@@ -23,17 +23,17 @@ from config import DRIFT_TEST, SCENARIO, STATE, THERMOSTAT
 POLICIES = ("never", "rules")
 
 
-def run(policy: str, seed: int = 0, state=None, box_settings: dict | None = None) -> dict:
+def run(policy: str, seed: int = 0, state=None, box_settings: dict | None = None, lab_settings: dict | None = None) -> dict:
     """Play the scenario with one policy; returns per-step arrays and the API (for its log).
 
     state: optional LabState; the run is recorded there under the policy name (actor = policy).
-    box_settings: optional THERMOSTAT overrides for this run (see LabAPI).
+    box_settings / lab_settings: optional THERMOSTAT / OPTICS overrides for this run (see LabAPI).
 
     Returns: dict with arrays (n_steps,) "t_s", "eta", "kalman", "T_true", "target", "measured", "checked",
              plus "lab_time_s" (lab time spent in measure_map and check_map), "warnings" and "api".
     """
     s = SETTINGS
-    api = LabAPI(seed=seed, state=state, run_name=policy, box_settings=box_settings)
+    api = LabAPI(seed=seed, state=state, run_name=policy, box_settings=box_settings, lab_settings=lab_settings)
     api.actor = policy
     scenario.add_events(api)
     api.measure_map()
@@ -110,15 +110,17 @@ if __name__ == "__main__":
     import json
     from pathlib import Path
 
-    from analysis import plots
+    from box_simulation.thermostat import pid_gains, pid_label
+    from config import PLOTS
 
+    main_pid = PLOTS["main_pid"]                    # the PID of the plots (THERMOSTAT is not changed)
     out = Path("results/baseline")
     out.mkdir(parents=True, exist_ok=True)
     state = LabState(STATE["db_path"])
     runs = {}
     for policy in POLICIES:
         state.delete_runs(policy)                    # a new run replaces the old one with the same name
-        runs[policy] = run(policy, state=state)
+        runs[policy] = run(policy, state=state, box_settings=pid_gains(main_pid))
     state.close()
     summary = {policy: summarize(r) for policy, r in runs.items()}
 
@@ -143,11 +145,8 @@ if __name__ == "__main__":
             for t, e, kal, tr, tg, m, c in zip(rr["t_s"], rr["eta"], rr["kalman"], rr["T_true"], rr["target"],
                                                 rr["measured"], rr["checked"])]
     (out / "results.csv").write_text(header + "\n" + "\n".join(rows) + "\n")
-    (out / "summary.json").write_text(json.dumps({"settings": SETTINGS, "results": summary}, indent=2))
+    (out / "summary.json").write_text(json.dumps({"settings": SETTINGS, "pid": pid_label(main_pid), "results": summary},
+                                                 indent=2))
 
-    events = scenario_events()
-    print(plots.plot_policy_comparison(
-        {"never": (n["t_s"], n["eta"], n["measured"]), "rules": (r["t_s"], r["eta"], r["measured"])},
-        events, out / "01_never_vs_rules_focus_brightness.png", colors={"never": "red", "rules": "blue"}))
     print(out / "results.csv")
     print(out / "summary.json")

@@ -30,11 +30,13 @@ SETTINGS = {**DRIFT_TEST, **LAB_API}   # same lab, camera, GGS, box and sample s
 class LabAPI:
     """The simulated lab behind one interface; every call adds one line to the log."""
 
-    def __init__(self, seed: int = 0, state=None, run_name: str = "run", box_settings: dict | None = None):
+    def __init__(self, seed: int = 0, state=None, run_name: str = "run", box_settings: dict | None = None,
+                 lab_settings: dict | None = None):
         """Build the lab and the box; seed shifts every seed in SETTINGS (seed=0 gives the drift_test seeds).
 
         state: optional LabState; then a run named run_name is started and every action is recorded.
         box_settings: optional THERMOSTAT overrides for this lab only (e.g. other PID gains).
+        lab_settings: optional OPTICS overrides for this lab only (e.g. time_drift_tau_min).
         """
         s = self.s = SETTINGS
         self.fake = lab.FakeLab(
@@ -43,7 +45,10 @@ class LabAPI:
             phase_error=s["phase_error"], flicker=s["flicker"],
         )
         self.X0 = self.fake.X_true.copy()                 # the sample at T_ref_C
-        self.sample = lab.TemperatureSample(self.X0, OPTICS["T_ref_C"], s["T_c"], OPTICS["T_step_C"], s["y_seed"] + seed)
+        optics = {**OPTICS, **(lab_settings or {})}
+        tau_min = optics["time_drift_tau_min"]
+        self.sample = lab.TemperatureSample(self.X0, OPTICS["T_ref_C"], s["T_c"], OPTICS["T_step_C"], s["y_seed"] + seed,
+                                            None if tau_min is None else 60.0 * tau_min, optics["time_drift_step_s"])
         self.E_test = lab.make_slm_patterns(s["n_test"], s["N"], np.random.default_rng(s["test_seed"] + seed))
         self.ggs_rng = np.random.default_rng(s["ggs_seed"] + seed)
 
@@ -77,7 +82,7 @@ class LabAPI:
             if self.state is not None and int(self.clock) % STATE["temperature_every_s"] == 0:
                 self.state.add_temperature(self.run_id, self.clock, float(self.box.x), float(self.box.z),
                                            float(self.box.target), int(self.box.duty))
-            self.fake.X_true = self.sample.at(self.box.T)
+            self.fake.X_true = self.sample.at(self.box.T, self.clock)
             for event in [e for e in self.events if e[0] <= self.clock]:
                 self.events.remove(event)
                 event[1]()
@@ -101,8 +106,10 @@ class LabAPI:
 
     def wait(self, seconds: float) -> None:
         """Let lab time pass (whole seconds)."""
+        t_start = self.clock
         self._advance(seconds)
         self._log(f"wait {seconds:g} s")
+        self._record(t_start, "wait", {"seconds": seconds}, None)
 
     def get_temperature(self) -> dict:
         """Last thermometer values in C: Kalman estimate, raw reading and the target (never the true temperature)."""

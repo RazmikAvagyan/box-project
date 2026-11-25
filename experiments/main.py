@@ -84,10 +84,11 @@ def main() -> dict:
     I_random = fake.measure(fake.patterns(1))[0]
     I_focus = fake.measure(metrics.focus_pattern(X_est, target))[0]
     saved = [
-        plots.plot_ggs_convergence(info["history"], out / "01_map_learning.png"),
-        plots.plot_focus(I_random, I_focus, s["image_shape"], target, out / "02_focusing_example.png"),
+        plots.plot_ggs_convergence(info["history"], out / "01_map_learning.png", f" (seed {s['seed']})"),
+        plots.plot_focus(I_random, I_focus, s["image_shape"], target, out / "02_focusing_example.png",
+                         f"Random vs. focusing SLM pattern on the camera (seed {s['seed']})"),
         plots.plot_enhancement(focus["eta"], focus["eta_theory"], s["N"],
-                              out / "03_focus_brightness_all_points.png"),
+                              out / "03_focus_brightness_all_points.png", f" (seed {s['seed']})"),
     ]
 
     # 6. Data. Plain Python numbers so json can save them.

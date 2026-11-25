@@ -220,14 +220,23 @@ class TemperatureSample:
     the same whatever order the grid is extended in. The grid grows lazily to any temperature asked for.
     Between grid points: linear interpolation, rescaled so that E[|X_nm|^2] stays 1.
     T_c is set by hand (source: thesis drift curve); the model is not measured on our sample.
+
+    Optional slow change with time (tau_s, None = off): every entry is multiplied by exp(i * phi_nm(t)), phi a
+    random walk per entry on a time grid (time_step_s, linear in between) with E[exp(i (phi(t1) - phi(t2)))] =
+    exp(-|t1 - t2| / tau_s). A phase does not change the size of an entry, so the entry distribution stays the
+    same, and corr(X(T1, t1), X(T2, t2)) ~ exp(-|T1 - T2| / T_c) * exp(-|t1 - t2| / tau_s).
     """
 
-    def __init__(self, X0: np.ndarray, T_ref: float, T_c: float, step: float, seed: int):
-        """X0 (N, M): the sample at T_ref (C); T_c: correlation temperature (C); step: grid step (C)."""
+    def __init__(self, X0: np.ndarray, T_ref: float, T_c: float, step: float, seed: int,
+                 tau_s: float | None = None, time_step_s: float = 10.0):
+        """X0 (N, M): the sample at T_ref (C) and t = 0; T_c: correlation temperature (C); step: grid step (C);
+        tau_s: time drift constant in s (None = no time drift); time_step_s: grid of the phase random walk (s)."""
         self.T_ref, self.step, self.seed = T_ref, step, seed
         self.rho = np.exp(-step / T_c)
         self.grid = {0: X0.copy()}
         self.k_min = self.k_max = 0
+        self.tau_s, self.time_step_s = tau_s, time_step_s
+        self.phases = [np.zeros(X0.shape)]          # phi at t = 0, time_step_s, 2 time_step_s, ...
 
     def _extend(self, k: int) -> None:
         """Build the chain out to grid index k."""
@@ -242,18 +251,36 @@ class TemperatureSample:
             Y = make_transmission_matrix(N, M, np.random.default_rng([self.seed, 1, -self.k_min]))
             self.grid[self.k_min] = self.rho * self.grid[self.k_min + 1] + a * Y
 
-    def at(self, T: float) -> np.ndarray:
-        """The sample at temperature T (C). Returns: X, shape (N, M), complex128 (a new array)."""
+    def at(self, T: float, t_s: float = 0.0) -> np.ndarray:
+        """The sample at temperature T (C) and lab time t_s (s, used only with time drift).
+        Returns: X, shape (N, M), complex128 (a new array)."""
         x = (T - self.T_ref) / self.step
         k = int(np.floor(x))
         w = x - k
         self._extend(k)
         if w == 0.0:
-            return self.grid[k].copy()
-        self._extend(k + 1)
-        # Neighbours have E[<X_k, X_k+1>] = rho per entry, so this keeps E[|X_nm|^2] = 1.
-        norm = np.sqrt((1 - w) ** 2 + w ** 2 + 2 * w * (1 - w) * self.rho)
-        return ((1 - w) * self.grid[k] + w * self.grid[k + 1]) / norm
+            X = self.grid[k].copy()
+        else:
+            self._extend(k + 1)
+            # Neighbours have E[<X_k, X_k+1>] = rho per entry, so this keeps E[|X_nm|^2] = 1.
+            norm = np.sqrt((1 - w) ** 2 + w ** 2 + 2 * w * (1 - w) * self.rho)
+            X = ((1 - w) * self.grid[k] + w * self.grid[k + 1]) / norm
+        if self.tau_s is None:
+            return X
+        return X * np.exp(1j * self._phase(t_s))
+
+    def _phase(self, t_s: float) -> np.ndarray:
+        """phi(t) (N, M): the random walk on the time grid, built lazily from t = 0, linear between grid points.
+        Each step adds normal(0, 2 * time_step_s / tau_s), so E[exp(i dphi)] = exp(-|dt| / tau_s)."""
+        x = abs(t_s) / self.time_step_s
+        j = int(np.floor(x))
+        sd = np.sqrt(2 * self.time_step_s / self.tau_s)
+        while len(self.phases) <= j + 1:
+            n = len(self.phases)
+            rng = np.random.default_rng([self.seed, 2, n])
+            self.phases.append(self.phases[-1] + sd * rng.standard_normal(self.phases[0].shape))
+        w = x - j
+        return (1 - w) * self.phases[j] + w * self.phases[j + 1]
 
 
 def column_correlation(X_a: np.ndarray, X_b: np.ndarray) -> np.ndarray:
@@ -431,6 +458,24 @@ if __name__ == "__main__":
     other = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9)
     assert np.allclose(other.at(19.6), sample.at(19.6)) and np.allclose(other.at(20.4), sample.at(20.4))
     print("TemperatureSample: equal differences give equal correlation, up != down, any temperature: OK")
+
+    # Time drift: off (None) changes nothing; with tau, at a fixed temperature the correlation after tau is ~exp(-1).
+    off = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9)
+    assert all(np.array_equal(off.at(T, t), sample.at(T)) for T, t in [(19.6, 0.0), (20.37, 500.0), (21.0, 7200.0)])
+    tau = 1800.0
+    drifting = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9, tau_s=tau,
+                                 time_step_s=OPTICS["time_drift_step_s"])
+    c_tau = float(column_correlation(drifting.at(20.4, 0.0), drifting.at(20.4, tau)).mean())
+    c_half = float(column_correlation(drifting.at(20.4, 100.0), drifting.at(20.4, 100.0 + tau / 2)).mean())
+    c_both = float(column_correlation(drifting.at(20.0, 0.0), drifting.at(20.4, tau)).mean())
+    print(f"time drift tau {tau:g} s: corr after tau {c_tau:.3f} (exp(-1) = {np.exp(-1):.3f}), after tau/2 {c_half:.3f} "
+          f"(exp(-0.5) = {np.exp(-0.5):.3f}), 0.4 C and tau {c_both:.3f} (exp(-0.25 - 1) = {np.exp(-1.25):.3f}); "
+          f"entry sizes unchanged: {bool(np.allclose(np.abs(drifting.at(20.4, tau)), np.abs(drifting.at(20.4, 0.0))))}")
+    assert abs(c_tau - np.exp(-1)) < 0.05 and abs(c_half - np.exp(-0.5)) < 0.05 and abs(c_both - np.exp(-1.25)) < 0.05
+    assert np.allclose(np.abs(drifting.at(20.4, tau)), np.abs(drifting.at(20.4, 0.0)))
+    again = TemperatureSample(X0, T_ref, T_c, OPTICS["T_step_C"], seed=9, tau_s=tau, time_step_s=OPTICS["time_drift_step_s"])
+    assert np.array_equal(again.at(20.4, 777.0), drifting.at(20.4, 777.0))
+    print("time drift: None changes nothing; corr ~ exp(-dt/tau); same seed, same result: OK")
 
     # Imperfections are random but still reproducible with the same seed.
     imperfect = [FakeLab(N=N, M=M, seed=0, phase_error=0.3, flicker=0.05) for _ in range(2)]

@@ -1,2 +1,10 @@
 numpy
 matplotlib
+langchain==1.4.10
+langchain-anthropic==1.7.10
+langchain-google-genai==4.4.3
+langchain-openai==1.7.4
+langgraph==1.2.24
+# cryptography (needed by langchain-google-genai) pinned: 48.0.1 is the newest with a wheel for Intel Macs;
+# newer versions must be compiled with Rust there.
+cryptography==48.0.1

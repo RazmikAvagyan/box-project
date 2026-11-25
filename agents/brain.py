@@ -2,8 +2,8 @@
 brain.py - the brains of the Map agent: what to do about the problems found in one loop.
 
 RulesBrain: the simple rules (re-measure only when the map is stale and the box is stable).
-AIBrain(provider): asks a language model (Claude, Gemini or OpenAI, plain HTTPS with urllib) for a
-JSON plan {"actions": [{"name": ..., "args": {...}}], "reason": "..."}. If the key is missing, the
+AIBrain(provider): asks a language model (Claude, Gemini or OpenAI, LangChain chat models with structured
+output) for a JSON plan {"actions": [{"name": ..., "args": {...}}], "reason": "..."}. If the key is missing, the
 call fails or times out, or the answer is bad (not JSON, unknown action, wrong args), the rules
 decide this loop instead and the agent writes a warning note "brain fallback: <why>".
 FakeBrain: an AIBrain without network that answers the rules plan as JSON text (for self-tests).
@@ -17,8 +17,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import urllib.error
-import urllib.request
+from pydantic import BaseModel
 
 from agents.lab_api import LabAPI
 from env import load_env
@@ -135,47 +134,43 @@ def parse(text: str, allowed: tuple[str, ...] = MAP_AGENT_ALLOWED) -> tuple[list
     return plan, str(answer.get("reason", "")).strip()
 
 
-def _post(url: str, headers: dict, body: dict) -> dict:
-    """POST JSON and return the JSON answer; HTTP errors keep a short part of the error body."""
-    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                     headers={"content-type": "application/json", **headers})
-    try:
-        with urllib.request.urlopen(request, timeout=SETTINGS["timeout_s"]) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read()[:200].decode(errors='replace')}") from None
+class Action(BaseModel):
+    """One planned action, as the model must give it (structured output)."""
+    name: str
+    args: dict[str, float] = {}
 
 
-def ask_claude(text: str, key: str, model: str) -> str:
-    """One Anthropic Messages API call; returns the answer text."""
-    out = _post("https://api.anthropic.com/v1/messages", {"x-api-key": key, "anthropic-version": "2023-06-01"},
-                {"model": model, "max_tokens": SETTINGS["max_tokens"], "temperature": SETTINGS["temperature"],
-                 "messages": [{"role": "user", "content": text}]})
-    return "".join(block["text"] for block in out["content"] if block["type"] == "text")
+class PlanAnswer(BaseModel):
+    """The model's whole answer (structured output); parse() still checks every value."""
+    actions: list[Action]
+    reason: str
 
 
-def ask_gemini(text: str, key: str, model: str) -> str:
-    """One Gemini generateContent call; returns the answer text (thought parts left out)."""
-    out = _post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                {"x-goog-api-key": key},
-                {"contents": [{"role": "user", "parts": [{"text": text}]}],
-                 "generationConfig": {"temperature": SETTINGS["temperature"],
-                                      "maxOutputTokens": SETTINGS["max_tokens"],
-                                      "responseMimeType": "application/json"}})
-    parts = out["candidates"][0]["content"]["parts"]
-    return "".join(part.get("text", "") for part in parts if not part.get("thought"))
+def chat_model(provider: str, key: str, max_tokens: int | None = None, timeout_s: float | None = None):
+    """The LangChain chat model for a provider ("claude", "gemini", "openai") with the AI_BRAIN model and key; the
+    limits are AI_BRAIN's unless given (the data analyst has its own); no retries, so a failed call falls back to
+    the rules at once."""
+    s = {**SETTINGS, **({"max_tokens": max_tokens} if max_tokens else {}), **({"timeout_s": timeout_s} if timeout_s else {})}
+    if provider == "claude":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model=s["models"]["claude"], anthropic_api_key=key, max_tokens=s["max_tokens"],
+                             temperature=s["temperature"], default_request_timeout=s["timeout_s"], max_retries=0)
+    if provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(model=s["models"]["gemini"], google_api_key=key, max_output_tokens=s["max_tokens"],
+                                      temperature=s["temperature"], timeout=s["timeout_s"], max_retries=0)
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(model_name=s["models"]["openai"], openai_api_key=key, max_tokens=s["max_tokens"],
+                      temperature=s["temperature"], request_timeout=s["timeout_s"], max_retries=0)
 
 
-def ask_openai(text: str, key: str, model: str) -> str:
-    """One OpenAI Chat Completions call; returns the answer text."""
-    out = _post("https://api.openai.com/v1/chat/completions", {"authorization": f"Bearer {key}"},
-                {"model": model, "max_completion_tokens": SETTINGS["max_tokens"],
-                 "temperature": SETTINGS["temperature"], "response_format": {"type": "json_object"},
-                 "messages": [{"role": "user", "content": text}]})
-    return out["choices"][0]["message"]["content"]
+def ask_model(provider: str, text: str, key: str) -> str:
+    """One LangChain call with structured output (PlanAnswer); returns the answer as JSON text for parse()."""
+    # json_schema: the model answers in the PlanAnswer schema (forced tool calling is not supported on newer Claude models).
+    answer = chat_model(provider, key).with_structured_output(PlanAnswer, method="json_schema").invoke(text)
+    return json.dumps(answer.model_dump())
 
 
-CALLERS = {"claude": ask_claude, "gemini": ask_gemini, "openai": ask_openai}
 
 
 class RulesBrain:
@@ -192,10 +187,11 @@ class AIBrain:
     """A language model as the brain; falls back to the rules for one loop on any error."""
 
     def __init__(self, provider: str, caller=None):
-        """provider: "claude", "gemini" or "openai"; caller(text, key, model) -> answer text (default: the real API)."""
+        """provider: "claude", "gemini" or "openai"; caller(text, key, model) -> answer text (default: the real model
+        through LangChain)."""
         load_env()
         self.provider = provider
-        self.caller = caller or CALLERS.get(provider)
+        self.caller = caller or (lambda text, key, model: ask_model(provider, text, key))
 
     def ask(self, text: str, problems: list[str]) -> str:
         """The model's answer text to the prompt `text`; raises on a missing key or a failed call."""
@@ -321,6 +317,6 @@ if __name__ == "__main__":
     print("fallbacks: ok")
 
     load_env()
-    for provider in CALLERS:
+    for provider in SETTINGS["models"]:
         found = bool(os.environ.get(SETTINGS["key_env"][provider]))
         print(f"{provider}: {'key found' if found else 'no API key, skipped'}")

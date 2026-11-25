@@ -1,0 +1,511 @@
+{
+  "brain": "rules brain (no AI)",
+  "claims": {
+    "What was simulated": [
+      {
+        "text": "A phase-only SLM with N = 64 squares shapes light through a scattering sample seen by M = 64 camera points; GGS learns the sample's transmission matrix (the map) from 512 photos, and a fresh map predicts the camera with correlation 0.874.",
+        "sources": [
+          "main/summary.json:settings.N",
+          "main/summary.json:settings.M",
+          "main/summary.json:results.L",
+          "main/summary.json:results.prediction_correlation"
+        ]
+      },
+      {
+        "text": "The box is held at its target by a PID and a Kalman filter; in the two-hour scenario the room warms by 3 \u00b0C, the cooler fails for 10 min and the user asks for a new target of 20.5 \u00b0C.",
+        "sources": [
+          "config.py:room_warm_by_C",
+          "config.py:cooler_fail_for_s",
+          "config.py:new_target_C"
+        ]
+      }
+    ],
+    "Thermostat": [
+      {
+        "text": "With PID 200/4 (real box today) the box never stays inside \u00b10.03 \u00b0C after a step (it swings); in a hold its temperature std is 0.1518 \u00b0C.",
+        "sources": [
+          "thermostat/summary.json:limit_C",
+          "thermostat/summary.json:pids.PID 200/4 (real box today).hold_std_C.Kalman"
+        ]
+      },
+      {
+        "text": "With PID 3000/0.36 (tuned in simulation) the box stays inside \u00b10.03 \u00b0C 13.7 min after a target step; in a hold its temperature std is 0.0050 \u00b0C.",
+        "sources": [
+          "thermostat/summary.json:limit_C",
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).cooldown_inside_limit_s",
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).hold_std_C.Kalman"
+        ]
+      },
+      {
+        "text": "With PID 800/0.5 (first search, real test 3) the box stays inside \u00b10.03 \u00b0C 20.3 min after a target step; in a hold its temperature std is 0.0111 \u00b0C.",
+        "sources": [
+          "thermostat/summary.json:limit_C",
+          "thermostat/summary.json:pids.PID 800/0.5 (first search, real test 3).cooldown_inside_limit_s",
+          "thermostat/summary.json:pids.PID 800/0.5 (first search, real test 3).hold_std_C.Kalman"
+        ]
+      },
+      {
+        "text": "The Kalman filter hardly changes the box temperature (hold std 0.0050 vs. 0.0051 \u00b0C on the raw sensor with PID 3000/0.36 (tuned in simulation)), but the cooler is much calmer: the duty change per control step has a std of 0.147 % instead of 4.909 %.",
+        "sources": [
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).hold_std_C.Kalman",
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).hold_std_C.raw sensor",
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).duty_change_std_pct.Kalman",
+          "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).duty_change_std_pct.raw sensor"
+        ]
+      },
+      {
+        "text": "Its readings are also more accurate: in the 30 min hold at 20 \u00b0C with PID 200/4 (real box today), the error std of the temperature reading is 0.0020 \u00b0C with the Kalman filter vs. 0.0167 \u00b0C for the raw sensor.",
+        "sources": [
+          "thermostat/summary.json:kalman_error_std_C.hold_s",
+          "thermostat/summary.json:target_C",
+          "thermostat/summary.json:kalman_error_std_C.Kalman",
+          "thermostat/summary.json:kalman_error_std_C.raw sensor"
+        ]
+      }
+    ],
+    "Optics and map staleness": [
+      {
+        "text": "The analyst's fit of the map checks against the temperature change gives T_c = 1.67 \u00b0C for the exponential intensity model, close to the lab model's 1.6 \u00b0C; the Gaussian form gives 0.78 \u00b0C because the model is not Gaussian.",
+        "sources": [
+          "analysis/agents/full_map_agent_pid_200_4_fresh_level:map T_c exponential",
+          "config.py:T_c",
+          "analysis/agents/full_map_agent_pid_200_4_fresh_level:map T_c gaussian"
+        ]
+      },
+      {
+        "text": "Without time drift the sample comes back when the temperature comes back, so never re-measuring keeps a mean \u03b7 of 33.5 with PID 200/4 (real box today); with time drift of 120 and 30 min it falls to 17.0 and 7.2.",
+        "sources": [
+          "compare/results.csv:PID 200/4 (real box today)|never|mean_eta.mean",
+          "config.py:time_drift_taus[0]",
+          "config.py:time_drift_taus[1]",
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|never|mean_eta.mean",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|never|mean_eta.mean"
+        ]
+      }
+    ],
+    "Operators compared": [
+      {
+        "text": "Mean \u03b7 and lab time on maps over 10 seeds are in the table below; a difference counts only beyond 2 standard errors of the paired seed differences.",
+        "sources": [
+          "config.py:seeds",
+          "config.py:se_factor"
+        ]
+      }
+    ],
+    "What the agents add, and where they do not": [
+      {
+        "text": "Full Map agent minus fixed rules, PID 200/4 (real box today), no time drift: -1.0 \u00b1 0.2 \u03b7 (lower).",
+        "sources": [
+          "compare/results.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff",
+          "compare/results.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se"
+        ]
+      },
+      {
+        "text": "Full Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), no time drift: -0.5 \u00b1 0.4 \u03b7 (no clear difference).",
+        "sources": [
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se"
+        ]
+      },
+      {
+        "text": "Full Map agent minus fixed rules, PID 200/4 (real box today), time drift 120 min: -0.7 \u00b1 0.3 \u03b7 (lower).",
+        "sources": [
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]"
+        ]
+      },
+      {
+        "text": "Full Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), time drift 120 min: -0.6 \u00b1 0.1 \u03b7 (lower).",
+        "sources": [
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]"
+        ]
+      },
+      {
+        "text": "Full Map agent minus fixed rules, PID 200/4 (real box today), time drift 30 min: -0.8 \u00b1 0.5 \u03b7 (no clear difference).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "Full Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), time drift 30 min: +0.7 \u00b1 0.2 \u03b7 (higher).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 200/4 (real box today), no time drift: -0.9 \u00b1 0.3 \u03b7 (lower).",
+        "sources": [
+          "compare/results.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff",
+          "compare/results.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), no time drift: -0.1 \u00b1 0.1 \u03b7 (no clear difference).",
+        "sources": [
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 200/4 (real box today), time drift 120 min: -1.1 \u00b1 0.4 \u03b7 (lower).",
+        "sources": [
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), time drift 120 min: -0.6 \u00b1 0.1 \u03b7 (lower).",
+        "sources": [
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 200/4 (real box today), time drift 30 min: -0.7 \u00b1 0.4 \u03b7 (no clear difference).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "Basic Map agent minus fixed rules, PID 3000/0.36 (tuned in simulation), time drift 30 min: +1.7 \u00b1 0.2 \u03b7 (higher).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "The agents notice the cooler failure much sooner: the full Map agent reacts after 99 s on average, the fixed rules after 277 s (PID 200/4 (real box today), no time drift).",
+        "sources": [
+          "compare/results.csv:PID 200/4 (real box today)|full|first_reaction_s.mean",
+          "compare/results.csv:PID 200/4 (real box today)|rules|first_reaction_s.mean"
+        ]
+      },
+      {
+        "text": "Their gain at time drift 30 min costs lab time: 1640 s on maps for the full Map agent vs. 1170 s for the fixed rules (PID 3000/0.36 (tuned in simulation)).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full|lab_time_on_maps_s.mean",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|rules|lab_time_on_maps_s.mean",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "The team gives exactly the full Map agent's numbers (difference +0.0 \u00b1 0.0 \u03b7), because both use the same stability rule.",
+        "sources": [
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se"
+        ]
+      }
+    ],
+    "New experiments and their answers": [
+      {
+        "text": "Question: Does the full Map agent beat the fixed rules at time drift 30 min with PID 200/4 (real box today)? With the saved 10 seeds the difference is -0.8 \u00b1 0.5 \u03b7 (no clear difference).",
+        "sources": [
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_n",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "Answer: with 20 seeds (saved and new) the full Map agent minus the fixed rules is -0.8 \u00b1 0.3 \u03b7, so lower.",
+        "sources": [
+          "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff_n",
+          "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff",
+          "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff_se"
+        ]
+      },
+      {
+        "text": "Question: At which time drift tau do the agents start to beat the fixed rules (PID 3000/0.36 (tuned in simulation))? Full Map agent minus fixed rules in \u03b7: no time drift -0.5 \u00b1 0.4 (no clear difference); time drift 120 min -0.6 \u00b1 0.1 (lower); time drift 60 min +0.5 \u00b1 0.1 (higher); time drift 30 min +0.7 \u00b1 0.2 (higher).",
+        "sources": [
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]",
+          "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "experiment2:tau",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "Answer: the full Map agent beats the fixed rules (beyond the 2 standard errors) at time drift 60 and 30 min; without time drift there is no clear difference, at time drift 120 min it is lower.",
+        "sources": [
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[0]",
+          "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "experiment2:tau",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se",
+          "config.py:time_drift_taus[1]",
+          "config.py:se_factor"
+        ]
+      },
+      {
+        "text": "Question: Does the team differ from the full Map agent? Answer: no; in every saved comparison the difference is exactly zero, seed by seed.",
+        "sources": [
+          "compare/results.csv:PID 200/4 (real box today)|team-full|mean_eta.diff",
+          "compare/results.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff",
+          "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se",
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff",
+          "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff",
+          "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se"
+        ]
+      }
+    ],
+    "What must be measured on the real setup": [
+      {
+        "text": "T_c of the real sample: the simulation assumes 1.6 \u00b0C (an estimate from the thesis drift curve); measure the map check against the temperature change on the real setup.",
+        "sources": [
+          "config.py:T_c"
+        ]
+      },
+      {
+        "text": "Time drift of the real sample at a constant temperature: the comparison tried tau 120 and 30 min, and whether the agents help depends on it.",
+        "sources": [
+          "config.py:time_drift_taus[0]",
+          "config.py:time_drift_taus[1]"
+        ]
+      },
+      {
+        "text": "The PID and the Kalman filter on the real box: PID 200/4 (real box today) swings and never stays inside \u00b10.03 \u00b0C in the simulation; test PID 3000/0.36 (tuned in simulation) on the box, and the sensor noise (0.0103 \u00b0C from the real test) that the Kalman filter is tuned for.",
+        "sources": [
+          "thermostat/summary.json:limit_C",
+          "config.py:sensor_std"
+        ]
+      }
+    ],
+    "Limitations": []
+  },
+  "sources": {
+    "analysis/agents/full_map_agent_pid_200_4_fresh_level:map T_c exponential": 1.665621007104072,
+    "analysis/agents/full_map_agent_pid_200_4_fresh_level:map T_c gaussian": 0.7775643284066998,
+    "compare/results.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff": -0.8836456596417704,
+    "compare/results.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se": 0.3433468855183347,
+    "compare/results.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff": -1.042780491120924,
+    "compare/results.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se": 0.2397611114563251,
+    "compare/results.csv:PID 200/4 (real box today)|full|first_reaction_s.mean": 99.4,
+    "compare/results.csv:PID 200/4 (real box today)|never|mean_eta.mean": 33.45125904369748,
+    "compare/results.csv:PID 200/4 (real box today)|rules|first_reaction_s.mean": 277.0,
+    "compare/results.csv:PID 200/4 (real box today)|team-full|mean_eta.diff": 0.0,
+    "compare/results.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se": 0.0,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff": -0.11548874419168768,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se": 0.09404807731441026,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff": -0.5447591328477934,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se": 0.3862551423836243,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff": 0.0,
+    "compare/results.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se": 0.0,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff": -1.0561273125857134,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se": 0.4470279442338362,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff": -0.7496816248040702,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se": 0.3466388292785115,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|never|mean_eta.mean": 17.013801431529792,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff": 0.0,
+    "compare/results_time_drift_120min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se": 0.0,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff": -0.6326422739440474,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se": 0.12454939246024449,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff": -0.577100009659597,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se": 0.12982690892848822,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff": 0.0,
+    "compare/results_time_drift_120min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se": 0.0,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff": -0.7164212165468712,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|basic-rules|mean_eta.diff_se": 0.3963813552557272,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff": -0.775500679747384,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_n": 10,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|full-rules|mean_eta.diff_se": 0.45428291152870914,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|never|mean_eta.mean": 7.226909079880746,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff": 0.0,
+    "compare/results_time_drift_30min.csv:PID 200/4 (real box today)|team-full|mean_eta.diff_se": 0.0,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff": 1.7300593576638073,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|basic-rules|mean_eta.diff_se": 0.21552140205515363,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff": 0.7431080117055903,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se": 0.17202420824525244,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|full|lab_time_on_maps_s.mean": 1640.4,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|rules|lab_time_on_maps_s.mean": 1170.0,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff": 0.0,
+    "compare/results_time_drift_30min.csv:PID 3000/0.36 (tuned in simulation)|team-full|mean_eta.diff_se": 0.0,
+    "config.py:T_c": 1.6,
+    "config.py:cooler_fail_for_s": 600.0,
+    "config.py:new_target_C": 20.5,
+    "config.py:room_warm_by_C": 3.0,
+    "config.py:se_factor": 2.0,
+    "config.py:seeds": 10.0,
+    "config.py:sensor_std": 0.0103,
+    "config.py:time_drift_taus[0]": 120.0,
+    "config.py:time_drift_taus[1]": 30.0,
+    "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff": -0.799466788246337,
+    "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff_n": 20,
+    "experiment1+saved:PID 200/4 (real box today)|full-rules|mean_eta.diff_se": 0.28541520900659095,
+    "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff": 0.5117773582062576,
+    "experiment2:PID 3000/0.36 (tuned in simulation)|full-rules|mean_eta.diff_se": 0.14466328543287124,
+    "experiment2:tau": 60.0,
+    "main/summary.json:results.L": 512.0,
+    "main/summary.json:results.prediction_correlation": 0.8742235184051473,
+    "main/summary.json:settings.M": 64.0,
+    "main/summary.json:settings.N": 64.0,
+    "thermostat/summary.json:kalman_error_std_C.Kalman": 0.001992624695941637,
+    "thermostat/summary.json:kalman_error_std_C.hold_s": 1800.0,
+    "thermostat/summary.json:kalman_error_std_C.raw sensor": 0.01673948891050599,
+    "thermostat/summary.json:limit_C": 0.03,
+    "thermostat/summary.json:pids.PID 200/4 (real box today).hold_std_C.Kalman": 0.15176187084505238,
+    "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).cooldown_inside_limit_s": 820.9,
+    "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).duty_change_std_pct.Kalman": 0.1473483093159431,
+    "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).duty_change_std_pct.raw sensor": 4.90945180192232,
+    "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).hold_std_C.Kalman": 0.005038765693516307,
+    "thermostat/summary.json:pids.PID 3000/0.36 (tuned in simulation).hold_std_C.raw sensor": 0.0050924288427312645,
+    "thermostat/summary.json:pids.PID 800/0.5 (first search, real test 3).cooldown_inside_limit_s": 1217.45,
+    "thermostat/summary.json:pids.PID 800/0.5 (first search, real test 3).hold_std_C.Kalman": 0.011120584280390942,
+    "thermostat/summary.json:target_C": 20.0
+  },
+  "dropped": [],
+  "questions": [
+    {
+      "id": "full_vs_rules_tau30_real_pid",
+      "text": "Does the full Map agent beat the fixed rules at time drift 30 min with PID 200/4 (real box today)?",
+      "experiment": {
+        "kind": "compare",
+        "operators": [
+          "rules",
+          "full"
+        ],
+        "pid": "PID 200/4 (real box today)",
+        "tau": 30,
+        "seeds": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ]
+      }
+    },
+    {
+      "id": "tau_where_agents_beat_rules",
+      "text": "At which time drift tau do the agents start to beat the fixed rules (PID 3000/0.36 (tuned in simulation))?",
+      "experiment": {
+        "kind": "compare",
+        "operators": [
+          "rules",
+          "full"
+        ],
+        "pid": "PID 3000/0.36 (tuned in simulation)",
+        "tau": 60,
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      }
+    },
+    {
+      "id": "team_vs_full",
+      "text": "Does the team differ from the full Map agent?",
+      "experiment": null
+    }
+  ],
+  "experiments": [
+    {
+      "kind": "compare",
+      "operators": [
+        "rules",
+        "full"
+      ],
+      "pid": "PID 200/4 (real box today)",
+      "tau": 30,
+      "seeds": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "estimated_min": 2.0,
+      "runs": 20,
+      "wall_min": 3.0818167527516684,
+      "id": "experiment1"
+    },
+    {
+      "kind": "compare",
+      "operators": [
+        "rules",
+        "full"
+      ],
+      "pid": "PID 3000/0.36 (tuned in simulation)",
+      "tau": 60,
+      "seeds": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "estimated_min": 3.081816752751668,
+      "runs": 20,
+      "wall_min": 2.8719613869984943,
+      "id": "experiment2"
+    }
+  ],
+  "not_answered": [],
+  "refused": [],
+  "cut": [],
+  "budget_used": {
+    "experiments": 2,
+    "runs": 40,
+    "wall_min": 5.953778139750163,
+    "over_budget_min": 0.0,
+    "max_experiments": 3,
+    "max_seeds": 10,
+    "max_compute_min": 40
+  },
+  "log": [
+    "read 1700 source numbers",
+    "experiment 1 (compare): 20 runs in 3.1 min",
+    "experiment 2 (compare): 20 runs in 2.9 min"
+  ]
+}

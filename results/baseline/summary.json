@@ -5,26 +5,29 @@
     "check_threshold": 0.8,
     "warn_after_s": 120
   },
+  "pid": "PID 3000/0.36 (tuned in simulation)",
   "results": {
     "never": {
-      "mean_eta": 47.47410870346932,
-      "min_eta": 1.4667028158649502,
-      "share_eta_above_30": 0.9166666666666666,
+      "mean_eta": 44.82236793623071,
+      "min_eta": 5.459912057775852,
+      "share_eta_above_30": 0.6916666666666667,
       "measure_map_calls": 0,
       "check_map_calls": 0,
       "lab_time_on_maps_s": 0.0,
       "warnings": 0,
-      "maps_while_box_off_target": 0
+      "maps_while_box_off_target": 0,
+      "share_within_limit": 0.6916666666666667
     },
     "rules": {
-      "mean_eta": 54.4735394261894,
-      "min_eta": 1.5703667632826668,
-      "share_eta_above_30": 0.9416666666666667,
-      "measure_map_calls": 3,
+      "mean_eta": 50.897350274974556,
+      "min_eta": 11.703521519001379,
+      "share_eta_above_30": 0.925,
+      "measure_map_calls": 4,
       "check_map_calls": 19,
-      "lab_time_on_maps_s": 408.0,
+      "lab_time_on_maps_s": 468.0,
       "warnings": 1,
-      "maps_while_box_off_target": 1
+      "maps_while_box_off_target": 1,
+      "share_within_limit": 0.675
     }
   }
 }

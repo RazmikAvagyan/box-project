@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import TARGET_C
+from config import PID_TUNING, PLOTS, TARGET_C
 from config import THERMOSTAT as SETTINGS
 
 
@@ -315,7 +315,47 @@ def cooler_off_rise(s: dict, T_start: float, duration_s: float) -> float:
     return float(x[0] - T_start)
 
 
+
+def pid_gains(name: str) -> dict:
+    """THERMOSTAT overrides for a PID by name: "real" (THERMOSTAT itself, empty overrides) or a key of PID_TUNING."""
+    return {} if name == "real" else dict(zip(("Kp", "Ki", "Kd"), PID_TUNING[name]))
+
+
+def pid_label(name: str) -> str:
+    """"PID Kp/Ki (note)", e.g. "PID 3000/0.36 (tuned in simulation)"."""
+    gains = {**SETTINGS, **pid_gains(name)}
+    return f"PID {gains['Kp']:g}/{gains['Ki']:g} ({PLOTS['pid_notes'][name]})"
+
+
+def pid_of(box_settings: dict | None) -> str:
+    """The PID name ("real" or a PID_TUNING key) with these gains, or "" if none matches."""
+    gains = {**SETTINGS, **(box_settings or {})}
+    for name in ["real", *PID_TUNING]:
+        if isinstance(PID_TUNING.get(name, ()), tuple) and all(gains[k] == v for k, v in pid_gains(name).items()) and \
+                (name != "real" or all(gains[k] == SETTINGS[k] for k in ("Kp", "Ki", "Kd"))):
+            return name
+    return ""
+
+
+def pid_text(box_settings: dict | None) -> str:
+    """The label of these gains ("PID 3000/0.36 (tuned in simulation)"), or just "PID Kp/Ki" for other gains."""
+    name = pid_of(box_settings)
+    gains = {**SETTINGS, **(box_settings or {})}
+    return pid_label(name) if name else f"PID {gains['Kp']:g}/{gains['Ki']:g}"
+
+
+def pid_tag(box_settings: dict | None) -> str:
+    """The PID part of a run name: "pid_<Kp>_<Ki>", e.g. "pid_3000_0.36"."""
+    gains = {**SETTINGS, **(box_settings or {})}
+    return f"pid_{gains['Kp']:g}_{gains['Ki']:g}"
+
+
+def plot_pids() -> list[str]:
+    """The PIDs the comparing plots show: the real box PID and the main PID (PLOTS main_pid), without repeats."""
+    return list(dict.fromkeys(["real", PLOTS["main_pid"]]))
+
 if __name__ == "__main__":
+    import json
     from pathlib import Path
 
     from analysis import plots
@@ -329,7 +369,8 @@ if __name__ == "__main__":
 
     # 1. Hold at 20 C for 30 min (several swing periods).
     # After a 300 s warm-up the PID integral has already built up, as in a box that has been running.
-    hold = simulate(1800, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300)
+    hold_s = 1800
+    hold = simulate(hold_s, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300)
     T_hold = hold["T_true"]
     dev = np.abs(T_hold - TARGET_C).max()
     sw = swing(hold["t_s"], T_hold, TARGET_C, *swing_args)
@@ -392,22 +433,34 @@ if __name__ == "__main__":
     Q_d_best = min(sweep_d, key=lambda Q_d: sweep_d[Q_d][2])
     print(f"Q_d sweep: best Q_d {Q_d_best:.0e} (SETTINGS uses {s['Q_d']:.0e})")
 
-    # 2. Step from target + 1 C to the target, 30 min, with the real PID and with the refined PID (override only).
-    from config import PID_TUNING
-    refined = dict(zip(("Kp", "Ki", "Kd"), PID_TUNING["refined"]))
-    steps, settle = {}, {}
-    for label, gains in [(f"PID {s['Kp']:g}/{s['Ki']:g}", {}), ("PID {:g}/{:g}".format(*PID_TUNING["refined"]), refined)]:
-        run = steps[label] = simulate(1800, control=True, T_start=TARGET_C + 1.0, target=TARGET_C, seed=1, settings={**s, **gains})
+    # 2. Step from target + 1 C to the target, 30 min, with the real PID, the refined PID (the limit is asserted for
+    # it), and the PIDs the plots show (overrides only).
+    names = list(dict.fromkeys(["real", "refined", PLOTS["main_pid"], "first_search"]))
+    steps, settle, limit_text, limit_s = {}, {}, {}, {}
+    for name in names:
+        run = steps[name] = simulate(1800, control=True, T_start=TARGET_C + 1.0, target=TARGET_C, seed=1,
+                                     settings={**s, **pid_gains(name)})
         outside = np.flatnonzero(np.abs(run["T_true"] - TARGET_C) >= band)
-        settling = settle[label] = run["t_s"][outside[-1]] + s["dt"] if outside.size else 0.0
-        print(f"step {TARGET_C + 1:g} -> {TARGET_C:g} C, {label}: inside ±{band:g} °C for good after "
+        settling = settle[name] = run["t_s"][outside[-1]] + s["dt"] if outside.size else 0.0
+        print(f"step {TARGET_C + 1:g} -> {TARGET_C:g} C, {pid_label(name)}: inside ±{band:g} °C for good after "
               f"{settling / 60:.1f} min (limit 10), undershoot {TARGET_C - run['T_true'].min():.3f} C")
         # Limit 10 min [estimate: the real box cooled by 1 C in about 3 min at full power, then the swing takes over].
-        if gains:
+        if name == "refined":
             assert settling <= 600, "step: not inside the swing band after 10 min"
-        elif settling > 600:
-            print(f"  expected to fail with the real {label} (swings ±0.3 C)")
-    step = steps[f"PID {s['Kp']:g}/{s['Ki']:g}"]          # the real PID, for the Kalman check below
+        elif name == "real" and settling > 600:
+            print(f"  expected to fail with the real {pid_label(name)} (swings ±0.3 C)")
+        # The +-limit_C time for the plot legend: inside the limit from then on until the end of the run.
+        out_lim = np.flatnonzero(np.abs(run["T_true"] - TARGET_C) > s["limit_C"])
+        end = run["t_s"][-1]
+        if out_lim.size and run["t_s"][out_lim[-1]] >= end - 60:
+            limit_text[name] = f"never inside ±{s['limit_C']:g} °C in {end / 60:.0f} min"
+            limit_s[name] = None
+        else:
+            limit_s[name] = float(run["t_s"][out_lim[-1]] + s["dt"]) if out_lim.size else 0.0
+            limit_text[name] = (f"stays inside ±{s['limit_C']:g} °C after "
+                                f"{(run['t_s'][out_lim[-1]] + s['dt'] if out_lim.size else 0.0) / 60:.1f} min")
+        print(f"  {pid_label(name)}: {limit_text[name]}")
+    step = steps["real"]          # the real PID, for the Kalman check below
     w = step["t_s"] <= 60.0
     print(f"Kalman vs true (cooldown 0-60 s): correlation {np.corrcoef(step['T_filtered'][w], step['T_true'][w])[0, 1]:.4f}, "
           f"error std {np.std(step['T_filtered'][w] - step['T_true'][w]):.4f} C")
@@ -445,23 +498,72 @@ if __name__ == "__main__":
     # Limit 10 min [estimate: about two swing periods].
     assert back <= 600, "cooler failure: the box does not come back in time"
 
+    # The plots: the main PID next to the real box PID, and the first-search PID as a third line.
+    shown = list(dict.fromkeys(["real", PLOTS["main_pid"], "first_search"]))
+    colors = dict(zip(shown, ["black", "darkorange", "tab:green"]))
+    holds = {}
+    for name in shown:
+        gains = {**s, **pid_gains(name)}
+        holds[name] = {kalman: simulate(1800, control=True, T_start=TARGET_C, target=TARGET_C, seed=0, warmup_s=300,
+                                        settings=gains, use_kalman=kalman) for kalman in (True, False)}
+    # Std of the duty change per control step (% of full duty), with and without Kalman, for plot 03 and the report.
+    for name in ("refined", "first_search"):
+        holds.setdefault(name, {kalman: simulate(1800, control=True, T_start=TARGET_C, target=TARGET_C, seed=0,
+                                                 warmup_s=300, settings={**s, **pid_gains(name)}, use_kalman=kalman)
+                                for kalman in (True, False)})
+    duty_pct = {n: {k: 100.0 * h[k]["duty"] / s["duty_max"] for k in (True, False)} for n, h in holds.items()}
+    duty_step = {n: {k: float(np.diff(d[k]).std()) for k in (True, False)} for n, d in duty_pct.items()}
+    for n, d in duty_step.items():
+        print(f"hold {TARGET_C:g} C, {pid_label(n)}: std of the duty change per control step {d[True]:.3f} % with Kalman, "
+              f"{d[False]:.3f} % on the raw sensor ({d[False] / d[True]:.1f} times calmer with Kalman)")
+    def window(name: str) -> tuple[float, float]:
+        """The first window (from 1 min on) where the Kalman duty stays above duty_working_pct (the cooler works) and the
+        raw sensor has no spike (no reading more than spike_min / 2 from the true temperature)."""
+        t, kal = holds[name][True]["t_s"], duty_pct[name][True]
+        raw_run = holds[name][False]
+        spike = np.abs(raw_run["T_raw"] - raw_run["T_true"]) > s["spike_min"] / 2
+        n = PLOTS["kalman_window_s"]
+        for t0 in np.arange(60.0, t[-1] - n, 5.0):
+            w = (t >= t0) & (t <= t0 + n)
+            if kal[w].min() > PLOTS["duty_working_pct"] and not spike[w].any():
+                return float(t0), float(t0 + n)
+        return 60.0, 60.0 + n
+
+    kalman_pids = ["real", "refined"]
+    legend = {n: f"{pid_label(n)}: {limit_text[n]}" for n in shown}
     paths = [
-        # Symlog axis: the 1 °C start and the few-millidegree wobble afterwards are both visible.
         plots.plot_box_deviation(
-            {f"{label}: inside ±{band:g} °C for good after {settle[label] / 60:.1f} min": (r["t_s"], r["T_true"], r["target"])
-             for label, r in steps.items()},
+            {legend[n]: (steps[n]["t_s"], steps[n]["T_true"], steps[n]["target"]) for n in shown},
             out / "01_pid_cooldown_21_to_20C.png",
-            "PID cooldown to the target: real PID vs. tuned PID",
-            colors={f"{label}: inside ±{band:g} °C for good after {settle[label] / 60:.1f} min": color
-                    for label, color in zip(steps, ["black", "darkorange"])}),
+            f"PID cooldown from {TARGET_C + 1:g} °C to {TARGET_C:g} °C, three PIDs (seed 1)",
+            colors={legend[n]: colors[n] for n in shown}),
         plots.plot_kalman_error(hold["t_s"], hold["T_true"], hold["T_raw"], hold["T_filtered"],
-                                out / "02_kalman_error_vs_raw_error.png"),
-        plots.plot_deviation_comparison(
-            hold["t_s"], {"PID + Kalman": (hold["T_true"], hold["target"]),
-                          "PID on raw sensor": (hold_raw["T_true"], hold_raw["target"])},
-            out / "03_pid_hold_20C_with_vs_without_kalman.png", "PID holding 20 °C: with and without the Kalman filter",
-            colors={"PID + Kalman": "blue", "PID on raw sensor": "red"}),
+                                out / "02_kalman_error_vs_raw_error.png",
+                                f" ({pid_label('real')}, hold at {TARGET_C:g} °C, seed 0)"),
+        plots.plot_kalman_summary(
+            {pid_label(n): {label: (holds[n][k]["t_s"], holds[n][k]["T_true"], holds[n][k]["target"], duty_pct[n][k])
+                            for k, label in [(True, "Kalman"), (False, "raw sensor")]} for n in kalman_pids},
+            {pid_label(n): window(n) for n in kalman_pids},
+            out / "03_pid_hold_20C_with_vs_without_kalman.png", "Kalman filter: same temperature, much calmer cooler (seed 0)",
+            colors={"Kalman": "blue", "raw sensor": "red"}),
     ]
+    # Numbers of this self-test for other tools (the Scientist): cooldown, hold, Kalman and duty per PID.
+    raw_err, kal_err = hold["T_raw"] - hold["T_true"], hold["T_filtered"] - hold["T_true"]
+    summary = {
+        "limit_C": s["limit_C"], "swing_band_C": band, "target_C": TARGET_C,
+        "kalman_error_std_C": {"raw sensor": float(raw_err.std()), "Kalman": float(kal_err.std()), "PID": pid_label("real"),
+                               "hold_s": float(hold_s)},
+        "pids": {pid_label(n): {
+            "cooldown_inside_limit_s": limit_s.get(n), "cooldown_inside_band_s": float(settle[n]) if n in settle else None,
+            "hold_std_C": {"Kalman": float(np.std(holds[n][True]["T_true"] - TARGET_C)),
+                           "raw sensor": float(np.std(holds[n][False]["T_true"] - TARGET_C))},
+            "hold_max_dev_C": {"Kalman": float(np.abs(holds[n][True]["T_true"] - TARGET_C).max()),
+                               "raw sensor": float(np.abs(holds[n][False]["T_true"] - TARGET_C).max())},
+            "duty_change_std_pct": {"Kalman": duty_step[n][True], "raw sensor": duty_step[n][False]},
+        } for n in holds},
+    }
+    (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    paths.append(out / "summary.json")
     for p in paths:
         print(p)
     print("thermostat.py self-test passed")
