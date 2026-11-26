@@ -11,6 +11,10 @@ The graph knows nothing about the task: the task is any object with
 Today the task is the Map agent (loop.MapTask, put together with the lab in loop.run_team); another task agent
 can replace it without changing this file. This module imports nothing optics-specific.
 The messages of the run are kept in the team state (and the Temperature agent writes them to the database).
+
+Hardware errors do not crash a run: an exception in the lab step, the Temperature agent or the task loop writes a
+warning note, puts the lab in its safe state (control on, current target kept) and skips the rest of that tick; after
+LAB_LIMITS max_errors errors the run stops cleanly (the data analyst still runs on what was recorded).
 """
 
 from __future__ import annotations
@@ -20,33 +24,65 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from agents.core.safe_lab import SafeLab
+from config import LAB_LIMITS
+
 
 class TeamState(TypedDict, total=False):
     """The team graph state, one tick at a time."""
     k: int                                              # tick number, 1 .. n_ticks
     alarms: list[str]                                   # watchdog alarms that fired this tick
     new_messages: list[dict]                            # messages sent this tick
+    failed: bool                                        # a hardware error ended this tick early
     messages: Annotated[list[dict], operator.add]       # every message of the run
 
 
 class Team:
     """The team graph over a lab (clock and wait), a task agent and the Temperature agent."""
 
-    def __init__(self, lab, task, temperature_agent, n_ticks: int, step_s: float, analyst=None):
-        """analyst: optional callable run once after the last tick (the data_analyst node); it returns findings."""
+    def __init__(self, lab, task, temperature_agent, n_ticks: int, step_s: float, analyst=None,
+                 max_errors: int = LAB_LIMITS["max_errors"]):
+        """analyst: optional callable run once after the last tick (the data_analyst node); it returns findings.
+        max_errors: hardware errors before the run stops cleanly."""
         self.lab, self.task, self.temperature_agent, self.analyst = lab, task, temperature_agent, analyst
         self.findings = []
+        self.max_errors, self.errors, self.stopped = max_errors, 0, False
         self.n_ticks, self.step_s = n_ticks, step_s
         self.graph = self._build_graph()
 
+    def failed(self, where: str, error: Exception) -> None:
+        """A hardware error: warning note, safe state (control on, target kept), count it; stop after max_errors."""
+        self.errors += 1
+        team = SafeLab(self.lab, "team", role="operator")
+        try:
+            team.note(f"hardware error in {where}: {type(error).__name__}: {error}; safe state: control on, target kept "
+                      f"(error {self.errors} of at most {self.max_errors})", level="warning")
+            team.set_control(True)
+        except Exception as second:
+            print(f"team: the safe state failed too ({type(second).__name__}: {second})")
+        if self.errors >= self.max_errors:
+            self.stopped = True
+            try:
+                team.note(f"run stopped after {self.errors} hardware errors; what was recorded is kept", level="warning")
+            except Exception:
+                pass
+
     def lab_step(self, state: TeamState) -> TeamState:
-        """Wait for the step_s grid, then the task's work of this step."""
+        """Wait for the step_s grid, then the task's work of this step (a hardware error ends the tick early)."""
         k = state.get("k", 0) + 1
-        # Each step starts on the step_s grid (later only if the last step's work took longer).
-        if self.lab.clock < k * self.step_s:
-            self.lab.wait(k * self.step_s - self.lab.clock)
-        self.task.on_step()
-        return {"k": k}
+        try:
+            # Each step starts on the step_s grid (later only if the last step's work took longer).
+            if self.lab.clock < k * self.step_s:
+                self.lab.wait(k * self.step_s - self.lab.clock)
+            self.task.on_step()
+        except Exception as error:
+            self.failed("lab step", error)
+            return {"k": k, "failed": True}
+        return {"k": k, "failed": False}
+
+    def after_lab_step(self, state: TeamState) -> str:
+        """Conditional edge: the watchdog, or after a hardware error straight to the end-of-tick decision."""
+        return self.end_of_run(state) if state["failed"] else "watchdog"
 
     def watchdog(self, state: TeamState) -> TeamState:
         """The alarms that fire now (the task's watchdog); they go to the Temperature agent and the task."""
@@ -54,7 +90,11 @@ class Team:
 
     def temperature(self, state: TeamState) -> TeamState:
         """One loop of the Temperature agent subgraph; its messages go into the team state."""
-        sent = self.temperature_agent.run_once(state["alarms"])
+        try:
+            sent = self.temperature_agent.run_once(state["alarms"])
+        except Exception as error:
+            self.failed("temperature agent", error)
+            sent = []
         return {"new_messages": sent, "messages": sent}
 
     def task_due(self, state: TeamState) -> str:
@@ -63,8 +103,11 @@ class Team:
         return self.task.name if self.reason else "skip"
 
     def task_loop(self, state: TeamState) -> TeamState:
-        """One loop of the task agent."""
-        self.task.run_loop(self.reason)
+        """One loop of the task agent (a hardware error skips the rest of the loop and its records)."""
+        try:
+            self.task.run_loop(self.reason)
+        except Exception as error:
+            self.failed(f"{self.task.name} loop", error)
         return {}
 
     def skip(self, state: TeamState) -> TeamState:
@@ -73,8 +116,8 @@ class Team:
         return {}
 
     def end_of_run(self, state: TeamState) -> str:
-        """Conditional edge: the next tick, or (after n_ticks) the data analyst, or END without one."""
-        if state["k"] < self.n_ticks:
+        """Conditional edge: the next tick, or (after n_ticks, or stopped after max_errors) the data analyst, or END."""
+        if state["k"] < self.n_ticks and not self.stopped:
             return "lab_step"
         return "data_analyst" if self.analyst else END
 
@@ -92,8 +135,9 @@ class Team:
         if self.analyst:
             graph.add_node("data_analyst", self.data_analyst)
             graph.add_edge("data_analyst", END)
+        end = "data_analyst" if self.analyst else END
         graph.add_edge(START, "lab_step")
-        graph.add_edge("lab_step", "watchdog")
+        graph.add_conditional_edges("lab_step", self.after_lab_step, ["watchdog", "lab_step", end])
         graph.add_edge("watchdog", "temperature_agent")
         graph.add_conditional_edges("temperature_agent", self.task_due, [self.task.name, "skip"])
         for name in (self.task.name, "skip"):
@@ -164,17 +208,19 @@ if __name__ == "__main__":
     assert "count_task" in team.mermaid() and "optics" not in sys.modules and "optics_simulation" not in sys.modules
     print("team graph with a made-up task (no optics imported): ok")
 
-    # 2. The real team: Temperature agent + Map agent (put together in agents/loop.py).
+    # 2. The real team: Temperature agent + Map agent (put together in agents/map_agent/loop.py).
     from pathlib import Path
 
     import numpy as np
 
-    from agents import baseline, loop
-    from agents.state import LabState
+    from agents.team import baseline
+
+    from agents.map_agent import loop
+    from agents.core.state import LabState
     from box_simulation.thermostat import pid_gains, pid_label
     from config import BASELINE, PLOTS, STATE
 
-    from agents import data_analyst
+    from agents.reporting import data_analyst
     from box_simulation.thermostat import pid_tag
     from config import ANALYST
 
@@ -183,11 +229,11 @@ if __name__ == "__main__":
     report_dir = Path(ANALYST["out_dir"]) / "team"
     state = LabState(STATE["db_path"])
     with_messages = loop.run_team(state=state, brain="rules", box_settings=box, run_name=f"team_{tag}",
-                                  report_dir=report_dir, script="agents/team.py")
+                                  report_dir=report_dir, script="agents/team/team.py")
     without = loop.run_team(state=state, brain="rules", switches={"use_messages": False}, run_name=f"team_{tag}_no_messages",
-                            box_settings=box, report_dir=report_dir, script="agents/team.py")
+                            box_settings=box, report_dir=report_dir, script="agents/team/team.py")
     full = loop.run(state=state, brain="rules", box_settings=box, run_name=f"team_reference_full_map_agent_{tag}_fresh_level",
-                    report_dir=report_dir, script="agents/team.py", operator="full Map agent (team reference)")
+                    report_dir=report_dir, script="agents/team/team.py", operator="full Map agent (team reference)")
 
     # With use_messages False the team equals the full Map agent (loop.run) exactly.
     a, b = baseline.summarize(without), baseline.summarize(full)
@@ -228,4 +274,39 @@ if __name__ == "__main__":
     (out / "team_graph.mmd").write_text(real.mermaid())
     print(f"saved {out / 'team_graph.mmd'}")
     print(f"analyst reports: {data_analyst.write_index(report_dir)}")
+
+    # 3. Hardware errors: a lab whose 5th measure_map fails (once, or from then on) does not crash the run.
+    from agents.core.lab_api import LabAPI, LabError
+
+    class FailingLab(LabAPI):
+        """The simulated lab, but measure_map number fail_from .. fail_until raises LabError (camera not answering)."""
+        fail_from, fail_until = 5, 5
+
+        def measure_map(self):
+            self.maps = getattr(self, "maps", 0) + 1
+            if self.fail_from <= self.maps <= self.fail_until:
+                raise LabError(f"camera did not answer (measure_map {self.maps})")
+            return super().measure_map()
+
+    class BrokenLab(FailingLab):
+        fail_until = np.inf
+
+    n_ticks = 2400 // BASELINE["step_s"]
+    for lab_class, stops in [(FailingLab, False), (BrokenLab, True)]:
+        state = LabState(":memory:")
+        r = loop.run_team(state=state, brain="rules", duration_s=2400, switches={"use_analyst": False},
+                          lab_class=lab_class, run_name="hardware_error_test")
+        notes = state.query("SELECT t_s, actor, text FROM notes WHERE actor = 'team' AND level = 'warning'")
+        controls = state.query("SELECT actor, args FROM actions WHERE action = 'set_control'")
+        print(f"{lab_class.__name__}: errors {r['errors']}, stopped {r['stopped']}, recorded steps {len(r['t_s'])} of "
+              f"{n_ticks}, control on {r['api'].box.control}, team notes:")
+        for note in notes:
+            print(f"  t={note['t_s']:.0f}s {note['text']}")
+        assert r["stopped"] == stops and r["api"].box.control and len(controls) == r["errors"]
+        assert all(c["actor"] == "team" and '"on": true' in c["args"] for c in controls)
+        if stops:
+            assert r["errors"] == LAB_LIMITS["max_errors"] and len(r["t_s"]) < n_ticks - LAB_LIMITS["max_errors"]
+            assert "run stopped" in notes[-1]["text"]
+        else:
+            assert r["errors"] == 1 and len(r["t_s"]) == n_ticks - 1      # only the failing tick has no record
     print("team.py self-test passed")

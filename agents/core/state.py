@@ -15,7 +15,7 @@ Tables (all rows carry run_id and the lab time t_s in seconds):
   messages:     run_id, t_s, sender, receiver, topic (one of TOPICS), text
   findings:     run_id, kind, text, value, unit, evidence (JSON) - written by the data analyst only
 
-Export one run as CSV files: python -m agents.state export <run name>  (writes results/export/<run name>/)
+Export one run as CSV files: python -m agents.core.state export <run name>  (writes results/export/<run name>/)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from config import STATE
 
 TABLES = ["temperatures", "maps", "focus", "actions", "notes", "messages", "findings"]
 # Message topics between the agents (the Temperature agent sends them, the Map agent reads them).
-TOPICS = ("box unstable", "box stable again", "target changed", "cooler problem")
+TOPICS = ("box unstable", "box stable again", "target changed", "cooler problem", "target too close to room")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, seed INTEGER,
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     else:
         import tempfile
 
-        from agents import baseline
+        from agents.team import baseline
 
         with tempfile.TemporaryDirectory() as tmp:
             state = LabState(Path(tmp) / "lab_state.sqlite")

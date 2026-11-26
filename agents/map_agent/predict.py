@@ -6,14 +6,17 @@ check = c0 * exp(-(dT / T_c)^2), dT = |kalman at the check - kalman at the last 
 c0 is the check of a fresh map (about 0.86, limited by camera noise). c0 and T_c are fitted by least
 squares on the (dT, check_map) pairs in the lab database, linearised as ln(check) = ln(c0) - dT^2 / T_c^2. Until min_points pairs exist the prediction is None (= always
 check). After max_bad predictions off by more than max_error, the predictor is not trusted for the run.
+With a form from staleness.py (PREDICTION form not "gaussian"), the check is modelled with that form instead:
+c0 * exp(-a * dT^beta [- b * dt]), beta fixed by the form, dt = time since the last map; c0, a (and b) fitted the same way.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from agents.state import LabState
-from agents.watchdog import kalman_at
+from agents.map_agent import staleness
+from agents.core.state import LabState
+from agents.map_agent.watchdog import kalman_at
 from config import PREDICTION as SETTINGS
 from config import TARGET_C
 
@@ -21,8 +24,9 @@ from config import TARGET_C
 class MapPredictor:
     """Predicts check_map from the Kalman temperature change since the last map."""
 
-    def __init__(self, state: LabState, run_id: int):
-        self.state, self.run_id = state, run_id
+    def __init__(self, state: LabState, run_id: int, form: dict | None = None):
+        """form: a staleness.py form {"name", "beta", "time"}, or None for the original gaussian code path."""
+        self.state, self.run_id, self.form = state, run_id, form
         self.n_bad = 0
         self.trusted = True
 
@@ -49,6 +53,12 @@ class MapPredictor:
         (ln_c0, a), *_ = np.linalg.lstsq(design, np.log(np.clip(check, 1e-3, 1.0)), rcond=None)
         return float(np.exp(ln_c0)), (float(1 / np.sqrt(a)) if a > 0 else np.inf)
 
+    def last_map_s(self, now: float) -> float | None:
+        """Lab time of the last measure_map at or before now (None without a map)."""
+        rows = self.state.query("SELECT MAX(t_s) AS t FROM maps WHERE run_id = ? AND kind = 'measure' AND t_s <= ?",
+                                (self.run_id, now))
+        return rows[0]["t"]
+
     def dT_now(self, now: float) -> float | None:
         """|kalman now - kalman at the last map| (C), None without a map."""
         rows = self.state.query("SELECT MAX(t_s) AS t FROM maps WHERE run_id = ? AND kind = 'measure' AND t_s <= ?",
@@ -61,11 +71,22 @@ class MapPredictor:
         """(predicted check, dT) at lab time now, or None (not enough pairs, no map, or not trusted)."""
         if not self.trusted:
             return None
+        if self.form is not None:
+            return self._predict_form(now)
         fit, dT = self.fit(now), self.dT_now(now)
         if fit is None or dT is None:
             return None
         c0, T_c = fit
         return float(c0 * np.exp(-(dT / T_c) ** 2)), dT
+
+    def _predict_form(self, now: float) -> tuple[float, float] | None:
+        """(predicted check, dT) with the staleness form, or None (fewer than min_points pairs, or no map)."""
+        dT, dt, check = staleness.pairs(self.state, self.run_id, now)
+        dT_now, t_map = self.dT_now(now), self.last_map_s(now)
+        if len(dT) < SETTINGS["min_points"] or dT_now is None:
+            return None
+        params = staleness.fit(self.form, dT, dt, check)
+        return float(staleness.predict(params, dT_now, now - t_map)), dT_now
 
     def test(self, check: float, predicted: float) -> float:
         """Compare a real check with the prediction; returns |error| and stops trusting after max_bad bad ones."""

@@ -8,3 +8,4 @@ langgraph==1.2.24
 # cryptography (needed by langchain-google-genai) pinned: 48.0.1 is the newest with a wheel for Intel Macs;
 # newer versions must be compiled with Rust there.
 cryptography==48.0.1
+mcp==2.3.0                # the MCP server (mcp_server/server.py); 2.x calls FastMCP "MCPServer"

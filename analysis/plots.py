@@ -301,7 +301,7 @@ def message_label_places(messages: list[tuple[float, str]], widths: dict[str, fl
 
 def plot_scenario(
     t_s: np.ndarray,
-    T_true: np.ndarray,
+    T_true: np.ndarray | None,
     T_kalman: np.ndarray,
     target: np.ndarray,
     T_room: np.ndarray,
@@ -314,13 +314,15 @@ def plot_scenario(
     places_out: list | None = None,
 ) -> Path:
     """Absolute temperatures (n,) in °C over t_s (n,) in s on one panel with the fixed range y_range: box (true and
-    Kalman, dashed), target and room; the cooler failure broken (start_s, end_s) shaded; numbered event lines.
+    Kalman, dashed; no true line when T_true is None or all nan, as on the real lab), target and room; the cooler
+    failure broken (start_s, end_s) shaded; numbered event lines.
     messages: optional (t_s, topic), each a small black triangle at PLOTS scenario_message_y_C with its label placed by
     message_label_places, with each label's width measured on the drawn figure (a lower label starts at its triangle
     and is joined to it by a thin grey line). places_out: optional list that receives the label places. Time in min."""
     fig, ax = _new_plot(title, "time (min)", "temperature (°C)")
     t = t_s / 60.0
-    ax.plot(t, T_true, linewidth=1.5, color="black", label="box, true temperature")
+    if T_true is not None and not np.all(np.isnan(np.asarray(T_true, dtype=float))):
+        ax.plot(t, T_true, linewidth=1.5, color="black", label="box, true temperature")
     ax.plot(t, T_kalman, linewidth=1.2, linestyle="--", color="tab:blue", label="box, Kalman estimate (dashed)")
     ax.plot(t, target, linewidth=1.2, linestyle="-.", color="green", label="target")
     ax.plot(t, T_room, linewidth=2.0, linestyle=":", color="tab:orange", label="room")

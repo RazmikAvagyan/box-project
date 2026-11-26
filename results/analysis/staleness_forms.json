@@ -1,0 +1,33 @@
+{
+  "PID 3000/0.36 (tuned in simulation), time drift none": {
+    "form": {
+      "name": "exponential",
+      "beta": 1.0,
+      "time": false
+    },
+    "run": "full_map_agent_pid_3000_0.36_fresh_level",
+    "checks": 20,
+    "loo_rmse": {
+      "exponential": 0.006736442939332811,
+      "gaussian": 0.04034151062199129,
+      "stretched": 0.007920305143664612
+    }
+  },
+  "PID 200/4 (real box today), time drift none": {
+    "form": {
+      "name": "stretched",
+      "beta": 0.9500000000000004,
+      "time": false
+    },
+    "run": "full_map_agent_pid_200_4_fresh_level",
+    "checks": 34,
+    "loo_rmse": {
+      "exponential": 0.010617357948808737,
+      "gaussian": 0.04750868995534219,
+      "stretched": 0.010214419144169425,
+      "exponential + time": 0.010653484076121282,
+      "gaussian + time": 0.046834666292303075,
+      "stretched + time": 0.01022813608905626
+    }
+  }
+}

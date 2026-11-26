@@ -5,7 +5,10 @@ The loop is a LangGraph graph with one node per phase (monitor -> diagnose -> pl
 problems the loop ends after diagnose); the graph state holds the observations, problems, planned actions, act
 results and the verify check of one loop. With use_messages the agent reads its unread messages at the start of
 each loop: after "box unstable" or "cooler problem" it does no check_map or measure_map until "box stable again".
-The simulation clock (LabAPI) and the lab database stay outside the graph.
+With AGENT_LOOP own_stability_check False (only together with use_messages) it does not compute "stable" from the
+thermometer rows: the box counts as stable unless such a message is open (then it is "not stable", same retry timing).
+The lab clock and the lab database stay outside the graph. The agent reaches the lab only through SafeLab (permissions
+of the map_agent role); with a human (human.py, HUMAN["mode"] not "off") the graph stops before act for approval.
 
 The Map agent keeps the map useful: it checks the map, and measures a new one only when the old
 one is stale AND the box is stable, i.e. inside target +- swing_band_C (a map taken while the
@@ -15,8 +18,8 @@ or an AI (Claude, Gemini, OpenAI, or a fake one for tests) that falls back to th
 Three plain-code helpers, each behind a switch in AGENT_LOOP (all off = the basic Map agent, all on = the full one):
 the watchdog (watchdog.py) reads the database every step and wakes the agent on an alarm; the safety
 check (safety.py) reviews every plan before act(); the predictor (predict.py) lets monitor() skip
-check_map when the predicted check is clearly good. The agent only uses LabAPI and the lab database
-(state.py), never the true temperature, and writes one short note per phase that did something, so the
+check_map when the predicted check is clearly good. The agent only uses the lab interface (lab_api.Lab, through
+SafeLab) and the lab database (state.py), never the true temperature, and writes one short note per phase that did something, so the
 database shows why it woke, what it planned, what safety refused and when a check was skipped.
 """
 
@@ -28,14 +31,17 @@ from typing import TypedDict
 import numpy as np
 from langgraph.graph import END, START, StateGraph
 
-from agents import brain as brains
-from agents import scenario
-from agents.brain import ALLOWED
-from agents.lab_api import LabAPI
-from agents.predict import MapPredictor
-from agents.safety import SafetyCheck
-from agents.state import LabState, TOPICS
-from agents.watchdog import Watchdog
+from agents.core import brain as brains
+from agents.team import scenario
+from agents.core.brain import ALLOWED
+from agents.core.human import Human, compile_graph, invoke
+from agents.core.lab_api import LabAPI
+from agents.map_agent.predict import MapPredictor
+from agents.map_agent import staleness
+from agents.core.safe_lab import SafeLab
+from agents.map_agent.safety import SafetyCheck
+from agents.core.state import LabState, TOPICS
+from agents.map_agent.watchdog import Watchdog
 from box_simulation import thermostat
 from config import AGENT_LOOP, ANALYST, OPTICS
 from config import AGENT_LOOP as SETTINGS
@@ -61,24 +67,32 @@ class LoopState(TypedDict, total=False):
 class Agent:
     """One agent: monitor, diagnose, plan, act and verify through the LabAPI and the lab database."""
 
-    def __init__(self, api: LabAPI, state: LabState, name: str, brain: str = AI_BRAIN["provider"],
-                 switches: dict | None = None):
-        """api: the lab; state: the lab database the api writes to; name: written as the actor;
+    def __init__(self, api, state: LabState, name: str, brain: str = AI_BRAIN["provider"],
+                 switches: dict | None = None, human: Human | None = None, prediction_form: dict | None = None):
+        """api: the lab (any lab_api.Lab, wrapped in SafeLab with the map_agent role, or a SafeLab already);
+        state: the lab database the api writes to; name: written as the actor;
         brain: provider name for brain.make ("rules", "fake", "claude", "gemini", "openai");
         switches: {"use_watchdog", "use_safety", "use_prediction", "use_fresh_level": bool}; missing keys come
-        from AGENT_LOOP."""
-        self.api, self.state, self.name = api, state, name
+        from AGENT_LOOP; human: the human in the loop (default: HUMAN in config.py, mode "off");
+        prediction_form: the predictor's staleness form (staleness.py; None = the original gaussian)."""
+        self.api = api if isinstance(api, SafeLab) else SafeLab(api, name, role="map_agent")
+        self.state, self.name = state, name
+        self.human = human or Human()
+        self.reason = ""
         self.brain = brains.make(brain)
         on = {**{key: SETTINGS[key] for key in SWITCHES}, **(switches or {})}
         self.use_fresh = on["use_fresh_level"]
         self.use_messages = on["use_messages"]
+        self.own_check = on.get("own_stability_check", SETTINGS["own_stability_check"])
+        if not self.own_check and not self.use_messages:
+            raise ValueError("own_stability_check False needs use_messages True: without the Temperature agent's "
+                             "messages the Map agent would never see an unstable box")
         self.hold, self.last_read = False, -np.inf    # waiting for "box stable again"; messages read up to this time
         self.fresh_checks = []          # verify check of every new map, oldest first
         self.backoff_s, self.no_map_until = None, -np.inf
         self.watchdog = Watchdog(state, api.run_id) if on["use_watchdog"] else None
         self.safety = SafetyCheck(state, api.run_id) if on["use_safety"] else None
-        self.predictor = MapPredictor(state, api.run_id) if on["use_prediction"] else None
-        api.actor = name
+        self.predictor = MapPredictor(state, api.run_id, prediction_form) if on["use_prediction"] else None
         self.warnings = 0
         self.graph = self._build_graph()
 
@@ -121,8 +135,11 @@ class Agent:
             self.last_read = self.api.clock
         status = self.api.get_status()
         temps = self.state.since("temperatures", self.api.run_id, self.api.clock - SETTINGS["stable_s"])
-        # The real PID swings about +-0.3 C, so "stable" means inside the swing band, not the thesis limit.
-        stable = all(abs(row["kalman"] - row["target"]) < THERMOSTAT["swing_band_C"] for row in temps)
+        if self.own_check:
+            # The real PID swings about +-0.3 C, so "stable" means inside the swing band, not the thesis limit.
+            stable = all(abs(row["kalman"] - row["target"]) < THERMOSTAT["swing_band_C"] for row in temps)
+        else:
+            stable = not self.hold          # the Temperature agent's messages decide
         alarms = [] if self.watchdog is None else list(self.watchdog.active)
         check, predicted, limit = None, False, self.stale_limit()
         # A check on a moving box says little and costs lab time; check only a stable box (and not while waiting
@@ -169,6 +186,7 @@ class Agent:
         (an AI brain's own note with its reason, or a warning "brain fallback: <why>" and the rules note)."""
         decision = self.brain.decide(obs, problems)
         plan = decision["plan"]
+        self.reason = decision["note"] or f"problems: {', '.join(problems)}"
         if decision["fallback"]:
             self._warn(f"brain fallback: {decision['fallback']}")
         if decision["note"]:
@@ -180,8 +198,9 @@ class Agent:
         return plan
 
     def act(self, plan: list[tuple[str, dict]]) -> list:
-        """Run each planned action through the api; names outside ALLOWED are refused and a failing action is
-        skipped, each with a warning note, so no plan can stop the run."""
+        """Run each planned action through the api; names outside ALLOWED are refused and an action refused by
+        SafeLab or with bad arguments is skipped, each with a warning note, so no plan can stop the run. A hardware
+        error (LabError, NotImplementedError, ...) goes up to the team graph, which puts the lab in its safe state."""
         results = []
         for name, args in plan:
             if name not in ALLOWED:
@@ -189,7 +208,7 @@ class Agent:
                 continue
             try:
                 results.append(getattr(self.api, name)(**args))
-            except Exception as e:
+            except (PermissionError, TypeError, ValueError) as e:
                 self._warn(f"act failed: {name}({args}): {type(e).__name__}: {e}")
         return results
 
@@ -263,11 +282,17 @@ class Agent:
         graph.add_edge("plan", "act")
         graph.add_edge("act", "verify")
         graph.add_edge("verify", END)
-        return graph.compile()
+        return compile_graph(graph, self.human)
+
+    def _review(self, values: dict) -> list[tuple[str, dict]]:
+        """The human's review at the interrupt before act: the approved actions. Actions an AI brain plans that the
+        rules would not also count as big."""
+        rules = None if self.brain.provider == "rules" else brains.rules_plan(values["problems"])
+        return self.human.review(self.api, self.name, values["actions"], self.reason, rules)
 
     def run_once(self) -> dict:
         """One loop through the five phases (one run of the graph); returns what happened in each."""
-        state = self.graph.invoke({})
+        state = invoke(self.graph, {}, self.human, self._review)
         return {"obs": state["obs"], "problems": state["problems"], "plan": state.get("actions", []),
                 "results": state.get("results", []), "verify": state.get("new_check")}
 
@@ -288,9 +313,13 @@ class MapTask:
     name = "map_agent"
     wake_topics = ("box stable again", "target changed")      # messages that make its loop run at once
 
-    def __init__(self, api: LabAPI, state: LabState, brain: str, switches: dict | None):
-        self.api = api
-        self.agent = Agent(api, state, self.name, brain, switches)
+    def __init__(self, api, state: LabState, brain: str, switches: dict | None, human: Human | None = None,
+                 prediction_form: dict | None = None):
+        """api: the lab (lab_api.Lab); the agent reaches it through SafeLab (map_agent role);
+        prediction_form: the predictor's staleness form (None = the original gaussian)."""
+        self.lab = api
+        self.api = SafeLab(api, self.name, role="map_agent")
+        self.agent = Agent(self.api, state, self.name, brain, switches, human, prediction_form)
         self.rec = {k: [] for k in ["t_s", "eta", "kalman", "T_true", "target", "measured", "checked"]}
         self.lab_time, self.last_loop, self.next_after = 0.0, api.clock, BASELINE["check_every_s"]
         self.wakes, self.skipped = [], 0    # watchdog wakes (t_s, alarms, acted) and checks skipped by the prediction
@@ -348,28 +377,44 @@ class MapTask:
 
     def record(self, measured: bool = False, checked: int = 0) -> None:
         """The records of this step (a step without a loop: record() with the defaults)."""
-        reading = self.step["reading"]
+        reading, truth = self.step["reading"], self.api.truth()
         for key, value in [("t_s", self.step["t_step"]), ("eta", self.step["eta"]), ("kalman", reading["kalman"]),
-                           ("T_true", self.api.box.T), ("target", reading["target"]), ("measured", measured),
+                           ("T_true", None if truth is None else truth["T_true"]), ("target", reading["target"]),
+                           ("measured", measured),
                            ("checked", checked)]:
             self.rec[key].append(value)
 
     def result(self) -> dict:
         """Per-step arrays and run totals (the keys of baseline.run, plus wakes, skipped and fresh_checks)."""
-        out = {key: np.array(values) for key, values in self.rec.items()}
-        out.update({"lab_time_s": self.lab_time, "warnings": self.agent.warnings, "api": self.api, "wakes": self.wakes,
+        # T_true is None (nan) on a lab that does not know it.
+        out = {key: np.array(values, dtype=float if key == "T_true" else None) for key, values in self.rec.items()}
+        out.update({"lab_time_s": self.lab_time, "warnings": self.agent.warnings, "api": self.lab, "wakes": self.wakes,
                     "skipped": self.skipped, "fresh_checks": np.array(self.agent.fresh_checks)})
         return out
+
+
+def drift_text(lab_settings: dict | None) -> str:
+    """"none" or "tau <min> min", the time drift of a run (as in the report header)."""
+    tau = {**OPTICS, **(lab_settings or {})}["time_drift_tau_min"]
+    return "none" if tau is None else f"tau {tau:g} min"
+
+
+def prediction_form_of(setting: str | dict | None, box_settings: dict | None, lab_settings: dict | None) -> dict | None:
+    """The predictor's form: a form dict as given, else staleness.resolve of the setting (default PREDICTION form)
+    for this setup (PID and time drift)."""
+    if isinstance(setting, dict):
+        return setting
+    setup = staleness.setup_key(thermostat.pid_text(box_settings), drift_text(lab_settings))
+    return staleness.resolve(setting or PREDICTION["form"], setup)
 
 
 def run_info(task: MapTask, operator: str, script: str, brain: str, seed: int, box_settings: dict | None,
              switches: dict | None, lab_settings: dict | None) -> dict:
     """The header of an analyst report: operator, script, brain, PID, seed, map rule, time drift, lab time, mean eta."""
     on = {**SETTINGS, **(switches or {})}
-    tau = {**OPTICS, **(lab_settings or {})}["time_drift_tau_min"]
     return {"script": script, "operator": operator, "brain": brain, "PID": thermostat.pid_text(box_settings),
             "seed": seed, "map rule": "fresh level" if on["use_fresh_level"] else "fixed 0.8",
-            "time drift": "none" if tau is None else f"tau {tau:g} min", "lab time of the run (s)": float(task.api.clock),
+            "time drift": drift_text(lab_settings), "lab time of the run (s)": float(task.api.clock),
             "mean eta": float(np.mean(task.rec["eta"]))}
 
 
@@ -382,8 +427,8 @@ def operator_name(switches: dict | None) -> str:
 
 def run(seed: int = 0, state: LabState | None = None, brain: str = AI_BRAIN["provider"],
         switches: dict | None = None, run_name: str | None = None, box_settings: dict | None = None,
-        lab_settings: dict | None = None, report_dir: str | Path | None = None, script: str = "agents/loop.py",
-        operator: str | None = None) -> dict:
+        lab_settings: dict | None = None, report_dir: str | Path | None = None, script: str = "agents/map_agent/loop.py",
+        operator: str | None = None, human: Human | None = None, prediction_form: str | dict | None = None) -> dict:
     """The 2-hour scenario with a focus photo every step_s, and agent.run_once() every check_every_s
     (counted from the start of the last loop), after retry_after_s while the box is not stable, and at once
     when the target changes or (with the watchdog) an alarm fires. The Map agent alone (no team).
@@ -391,7 +436,8 @@ def run(seed: int = 0, state: LabState | None = None, brain: str = AI_BRAIN["pro
     state: the lab database (an in-memory one if None); brain: provider name; switches: see Agent;
     the run is saved as run_name (default "map_agent_<brain>"); box_settings / lab_settings: THERMOSTAT / OPTICS overrides (see LabAPI);
     report_dir: where the analyst writes its report (default results/analysis/map_agent); script and operator (default from
-    the switches): for the report header.
+    the switches): for the report header; human: the human in the loop (default HUMAN in config.py);
+    prediction_form: the predictor's staleness form, a PREDICTION form setting or a form dict (default PREDICTION form).
     Returns the same keys as baseline.run ("checked" counts the check_map calls in each step).
     """
     s = BASELINE
@@ -399,7 +445,8 @@ def run(seed: int = 0, state: LabState | None = None, brain: str = AI_BRAIN["pro
     run_name = f"map_agent_{brain}" if run_name is None else run_name
     state.delete_runs(run_name)
     api = LabAPI(seed=seed, state=state, run_name=run_name, box_settings=box_settings, lab_settings=lab_settings)
-    task = MapTask(api, state, brain, switches)
+    task = MapTask(api, state, brain, switches, human, prediction_form_of(prediction_form, box_settings, lab_settings))
+    api.actor = task.name                      # the run's own waits are the Map agent's
     scenario.add_events(api)
     task.start()
     for k in range(1, int(SCENARIO["duration_s"] // s["step_s"]) + 1):
@@ -414,7 +461,7 @@ def run(seed: int = 0, state: LabState | None = None, brain: str = AI_BRAIN["pro
             task.record()
     out = task.result()
     if {**SETTINGS, **(switches or {})}["use_analyst"]:
-        from agents import data_analyst
+        from agents.reporting import data_analyst
         info = run_info(task, operator or operator_name(switches), script, brain, seed, box_settings, switches, lab_settings)
         out["findings"] = data_analyst.analyze_and_save(
             state, api.run_id, brain, report_dir or Path(ANALYST["out_dir"]) / "map_agent", info)
@@ -424,44 +471,52 @@ def run(seed: int = 0, state: LabState | None = None, brain: str = AI_BRAIN["pro
 def run_team(seed: int = 0, state: LabState | None = None, box_settings: dict | None = None,
              brain: str = AI_BRAIN["provider"], switches: dict | None = None, run_name: str | None = None,
              duration_s: float = SCENARIO["duration_s"], lab_settings: dict | None = None,
-             report_dir: str | Path | None = None, script: str = "agents/loop.py") -> dict:
+             report_dir: str | Path | None = None, script: str = "agents/map_agent/loop.py", human: Human | None = None,
+             lab_class=LabAPI, prediction_form: str | dict | None = None) -> dict:
     """The scenario with the team graph (team.py): the Temperature agent and the Map agent as its task.
-    Returns the keys of run(), plus "messages" (dicts t_s, sender, receiver, topic, text) and
-    "temperature_refusals". report_dir: where the analyst writes its report (default results/analysis/team)."""
-    from agents.team import Team
-    from agents.temperature_agent import TemperatureAgent
+    Returns the keys of run(), plus "messages" (dicts t_s, sender, receiver, topic, text), "temperature_refusals",
+    "errors" (hardware errors the team handled) and "stopped" (the run stopped early after max_errors).
+    report_dir: where the analyst writes its report (default results/analysis/team); human: the human in the loop for
+    both agents (default HUMAN in config.py); lab_class: the simulated lab class (a test can use a failing one);
+    prediction_form: the predictor's staleness form (see run)."""
+    from agents.team.team import Team
+    from agents.temperature.temperature_agent import TemperatureAgent
 
     state = LabState(":memory:") if state is None else state
     run_name = f"team_{brain}" if run_name is None else run_name
     state.delete_runs(run_name)
-    api = LabAPI(seed=seed, state=state, run_name=run_name, box_settings=box_settings, lab_settings=lab_settings)
-    task = MapTask(api, state, brain, switches)
-    temperature = TemperatureAgent(api, state, receiver=task.name)
+    api = lab_class(seed=seed, state=state, run_name=run_name, box_settings=box_settings, lab_settings=lab_settings)
+    human = human or Human()
+    task = MapTask(api, state, brain, switches, human, prediction_form_of(prediction_form, box_settings, lab_settings))
+    temperature = TemperatureAgent(api, state, receiver=task.name, human=human)
     api.actor = task.name
     scenario.add_events(api)
     task.start()
     analyst = None
     if {**SETTINGS, **(switches or {})}["use_analyst"]:
-        from agents import data_analyst
-        team_op = "team" + ("" if {**SETTINGS, **(switches or {})}["use_messages"] else " without messages")
+        from agents.reporting import data_analyst
+        on = {**SETTINGS, **(switches or {})}
+        team_op = "team" + ("" if on["use_messages"] else " without messages") + \
+            ("" if on["own_stability_check"] else ", no own stability check")
         analyst = lambda: data_analyst.analyze_and_save(
             state, api.run_id, brain, report_dir or Path(ANALYST["out_dir"]) / "team",
             run_info(task, team_op, script, brain, seed, box_settings, switches, lab_settings))
     team = Team(api, task, temperature, int(duration_s // BASELINE["step_s"]), BASELINE["step_s"], analyst)
     messages = team.run()
     out = task.result()
-    out.update({"messages": messages, "temperature_refusals": temperature.refusals})
+    out.update({"messages": messages, "temperature_refusals": temperature.refusals, "errors": team.errors,
+                "stopped": team.stopped})
     if analyst:
         out["findings"] = team.findings
     return out
 
 
 if __name__ == "__main__":
-    from agents import data_analyst
+    from agents.reporting import data_analyst
     import json
     import os
 
-    from agents import baseline
+    from agents.team import baseline
     from analysis import plots
     from config import STATE
 
@@ -489,6 +544,11 @@ if __name__ == "__main__":
     assert agent.warnings == 5 and api.box.control and api.box.target == THERMOSTAT["target"]
     agent.act([("focus", {"point": 99999}), ("wait", {"seconds": 1})])   # act() itself, without parse()
     assert agent.warnings == 6
+    try:
+        Agent(api, test_state, "map_agent", "rules", {"own_stability_check": False, "use_messages": False})
+        raise AssertionError("own_stability_check False without use_messages must raise")
+    except ValueError as error:
+        print(f"own_stability_check False without use_messages: ValueError ({error})")
     test_state.close()
     print("bad AI answers (set_control, set_target, focus(99999), wait(-50), wait(100000)) fell back; "
           "a failing action in act() warned; the run went on: ok")

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from agents.state import LabState
+from agents.core.state import LabState
 from config import STATE, TARGET_C, THERMOSTAT
 from config import WATCHDOG as SETTINGS
 

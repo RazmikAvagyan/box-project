@@ -19,7 +19,7 @@ import json
 import os
 from pydantic import BaseModel
 
-from agents.lab_api import LabAPI
+from agents.core.lab_api import LabAPI
 from env import load_env
 from config import AGENT_LOOP, BASELINE, DRIFT_TEST, LAB_API, TARGET_C, THERMOSTAT
 from config import AI_BRAIN as SETTINGS

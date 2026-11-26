@@ -5,7 +5,9 @@ It reads only the lab database (LabState), never the simulation, so it works the
 only to the findings and notes tables, plus results/analysis/<run name>.json and <run name>.md.
 
 Every analysis is plain code (numpy) and a LangChain tool: temperature, events, lab time, agents, and the
-task-specific map staleness (TASK_TOOLS; another task adds its own analysis there); comparing groups of runs is a
+task-specific map staleness (TASK_TOOLS; another task adds its own analysis there; it also fits every staleness form
+of staleness.py, reports each form's held-out error and the form chosen in code, and remembers the choice for the
+run's setup so the predictor with PREDICTION form "auto" can use it); comparing groups of runs is a
 tool too. Each tool returns findings: dicts kind, text (one plain sentence), value, unit, evidence.
 
 The brain is chosen like the Map agent's (AI_BRAIN provider; "fake" for tests; "rules"):
@@ -31,8 +33,9 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
-from agents.predict import MapPredictor
-from agents.state import LabState
+from agents.map_agent import staleness
+from agents.map_agent.predict import MapPredictor
+from agents.core.state import LabState
 from config import AGENT_LOOP, AI_BRAIN, THERMOSTAT, WATCHDOG
 from config import ANALYST as SETTINGS
 from env import load_env
@@ -221,6 +224,7 @@ def map_staleness(data: dict) -> list[dict]:
             out.append(finding("map T_c exponential", f"Fit c0·exp(-2·dT/T_c): T_c {T_c:.2f} ± {T_c_se:.2f} °C, c0 "
                                f"{c0:.3f} ± {c0_se:.3f} ({len(dT)} checks).", T_c, "C",
                                {**evidence, "T_c_se": T_c_se, "c0": c0, "c0_se": c0_se}))
+    out += staleness_forms(data)
     window, gains = SETTINGS["focus_window_s"], []
     focus_t = np.array([f["t_s"] for f in data["focus"]])
     eta = np.array([f["eta"] for f in data["focus"]])
@@ -240,6 +244,35 @@ def map_staleness(data: dict) -> list[dict]:
         out.append(finding("focus gain per new map", f"A new map changed the mean eta by {np.mean(gains):+.1f} on "
                            f"average ({len(gains)} maps).", np.mean(gains), "eta", {"table": "maps + focus",
                                                                                      "maps": len(gains)}))
+    return out
+
+
+def staleness_forms(data: dict) -> list[dict]:
+    """Every candidate staleness form (staleness.py) with its leave-one-out error, score and parameters, and the form
+    chosen in code (lowest score); nothing with fewer than PREDICTION min_points checks."""
+    dT, dt, check = staleness.pairs(data["state"], data["run_id"])
+    choice = staleness.choose(dT, dt, check)
+    if choice is None:
+        return []
+    finite = lambda x: None if x is None or not np.isfinite(x) else float(x)
+    out = []
+    for name, f in choice["forms"].items():
+        r = f["readable"]
+        extra = f", beta {r['beta']:.2f}" if staleness.FORMS[name]["beta"] is None else ""
+        extra += "" if r["tau_s"] is None else (", time term none" if finite(r["tau_s"]) is None
+                                                else f", tau {r['tau_s']:.0f} s")
+        out.append(finding(f"staleness fit {name}", f"Form {name}: leave-one-out error {f['loo_rmse']:.4f}, score "
+                           f"{f['score']:.1f} ({f['k']} parameters), c0 {r['c0']:.3f}{extra} ({choice['n']} checks).",
+                           f["loo_rmse"], "check", {"table": "maps + temperatures", "checks": choice["n"],
+                                                     "score": f["score"], "parameters": f["k"], "c0": r["c0"],
+                                                     "T_c_C": finite(r["T_c_C"]), "beta": r["beta"],
+                                                     "tau_s": finite(r["tau_s"])}))
+    best = choice["forms"][choice["chosen"]]
+    out.append(finding("staleness form chosen", f"Chosen staleness form: {choice['chosen']} (lowest score "
+                       f"{best['score']:.1f} of {len(choice['forms'])} forms; leave-one-out error {best['loo_rmse']:.4f}).",
+                       best["loo_rmse"], "check", {"table": "maps + temperatures", "form": choice["form"],
+                                                   "checks": choice["n"], "score": best["score"],
+                                                   "loo_rmse": {n: f["loo_rmse"] for n, f in choice["forms"].items()}}))
     return out
 
 
@@ -336,7 +369,7 @@ def chat_model(provider: str, data: dict, replies: list[AIMessage] | None = None
     """The chat model for the analyst: a fake one (replies, or the default rules-like replies) or a real provider."""
     if provider == "fake":
         return FakeAnalystModel(messages=iter(replies or _rules_replies(data)))
-    from agents.brain import chat_model as provider_model
+    from agents.core.brain import chat_model as provider_model
     load_env()
     key = os.environ.get(AI_BRAIN["key_env"][provider])
     if not key:
@@ -439,6 +472,13 @@ def analyze_and_save(state: LabState, run_id: int, brain: str = AI_BRAIN["provid
     """analyze_run, then save (into out_dir, given by the caller); what loop.run and loop.run_team call at the end."""
     findings = analyze_run(state, run_id, brain)
     save(state, run_id, findings, out_dir, run_info)
+    # The chosen staleness form (made in code, whatever the brain wrote) is remembered for the run's setup.
+    chosen = [f for f in findings if f["kind"] == "staleness form chosen"]
+    if chosen and run_info and "PID" in run_info and "time drift" in run_info:
+        e = chosen[0]["evidence"]
+        name = state.query("SELECT name FROM runs WHERE id = ?", (run_id,))[0]["name"]
+        staleness.save_choice(staleness.setup_key(run_info["PID"], run_info["time drift"]), e["form"], e["checks"],
+                              e["loo_rmse"], name)
     return findings
 
 
@@ -527,7 +567,7 @@ def analyze_runs(state: LabState, run_ids: list[int], other_ids: list[int] | Non
 if __name__ == "__main__":
     import tempfile
 
-    from agents import loop
+    from agents.map_agent import loop
     from config import DRIFT_TEST, PID_TUNING, SCENARIO
 
     state = LabState(":memory:")

@@ -11,7 +11,10 @@ Messages to the Map agent, each once per event (written to the database and retu
   "cooler problem"   the watchdog alarm "cooler at full power"
   "box stable again" after one of the two above, once the box is back inside the band for AGENT_LOOP stable_s
   "target changed"   after every change of the target (the user changes it; this agent never does)
-Allowed actions: wait, send_message, and set_control(on=True) only (it may switch the PID back on, never off).
+  "target too close to room"  with a target change, if the new target is above room - LAB_LIMITS room_margin_C (the
+                     box can only cool); with the room temperature unknown the check is skipped with a note
+Allowed actions: wait, send_message, and set_control(on=True) only (it may switch the PID back on, never off). It reaches
+the lab only through SafeLab (temperature_agent role); with a human (human.py) its graph stops before act for approval.
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ from typing import TypedDict
 import numpy as np
 from langgraph.graph import END, START, StateGraph
 
-from agents.state import LabState, TOPICS
+from agents.core.human import Human, compile_graph, invoke
+from agents.core.safe_lab import SafeLab, target_vs_room
+from agents.core.state import LabState, TOPICS
 from config import AGENT_LOOP, TARGET_C, THERMOSTAT, WATCHDOG
 
 TEMPERATURE_ALLOWED = ("wait", "send_message", "set_control")
@@ -39,10 +44,16 @@ class TemperatureState(TypedDict, total=False):
 
 
 class TemperatureAgent:
-    """Rules-brain Temperature agent; api gives the clock, notes and set_control (LabAPI or a stand-in)."""
+    """Rules-brain Temperature agent; api gives the clock, notes, the thermometer and set_control (any lab_api.Lab or a
+    stand-in), always through SafeLab with the temperature_agent role."""
 
-    def __init__(self, api, state: LabState, name: str = "temperature_agent", receiver: str = "map_agent"):
-        self.api, self.state, self.name, self.receiver = api, state, name, receiver
+    def __init__(self, api, state: LabState, name: str = "temperature_agent", receiver: str = "map_agent",
+                 human: Human | None = None):
+        """human: the human in the loop (default HUMAN in config.py, mode "off")."""
+        self.api = api if isinstance(api, SafeLab) else SafeLab(api, name, role="temperature_agent")
+        self.state, self.name, self.receiver = state, name, receiver
+        self.human = human or Human()
+        self.room_detail = ""
         self.unstable = self.cooler = False         # a "box unstable" / "cooler problem" event is open
         self.last_target = None
         self.control_on_t = -np.inf                 # last set_control(on=True), retried at most once per off_target_s
@@ -51,10 +62,8 @@ class TemperatureAgent:
         self.graph = self._build_graph()
 
     def _note(self, text: str, level: str = "info") -> None:
-        """A note in the lab database with this agent as the actor."""
-        actor, self.api.actor = self.api.actor, self.name
+        """A note in the lab database with this agent as the actor (SafeLab writes it as this agent)."""
         self.api.note(text, level=level)
-        self.api.actor = actor
 
     def _window(self, rows: list[dict], now: float, seconds: float) -> list[dict]:
         """The rows of the last `seconds`, or [] if they do not yet cover that whole time."""
@@ -77,6 +86,13 @@ class TemperatureAgent:
         problems = []
         if self.last_target is not None and rows[-1]["target"] != self.last_target:
             problems.append("target changed")
+            room = self.api.get_temperature().get("room")
+            warning = target_vs_room(rows[-1]["target"], room)
+            if room is None:
+                self._note("target vs room check skipped: room temperature unknown")
+            elif warning:
+                problems.append("target too close to room")
+                self.room_detail = warning
         off = self._window(rows, now, WATCHDOG["off_target_s"])
         if not self.unstable and off and all(abs(r["kalman"] - r["target"]) > band for r in off):
             problems.append("box unstable")
@@ -96,7 +112,8 @@ class TemperatureAgent:
         """Rules brain: a message for every event, and switch the PID back on if it seems off."""
         last = state["obs"]["rows"][-1]
         detail = f"kalman {last['kalman']:.2f} C, target {last['target']:g} C"
-        plan = [("send_message", {"topic": p, "text": detail}) for p in state["problems"] if p in TOPICS]
+        plan = [("send_message", {"topic": p, "text": self.room_detail if p == "target too close to room" else detail})
+                for p in state["problems"] if p in TOPICS]
         if "control seems off" in state["problems"]:
             plan.append(("set_control", {"on": True}))
         return {"proposed": plan}
@@ -155,20 +172,28 @@ class TemperatureAgent:
         for a, b in [("plan", "safety"), ("safety", "act"), ("act", "verify")]:
             graph.add_edge(a, b)
         graph.add_edge("verify", END)
-        return graph.compile()
+        return compile_graph(graph, self.human)
+
+    def _review(self, values: dict) -> list[tuple[str, dict]]:
+        """The human's review at the interrupt before act (rules brain only: nothing counts as an AI extra)."""
+        return self.human.review(self.api, self.name, values["actions"], ", ".join(values["problems"]))
 
     def run_once(self, alarms: list[str]) -> list[dict]:
         """One loop at the current lab time with this step's watchdog alarms; returns the messages sent."""
-        return self.graph.invoke({"alarms": alarms}).get("sent", [])
+        return invoke(self.graph, {"alarms": alarms}, self.human, self._review).get("sent", [])
 
 
 if __name__ == "__main__":
     band, target = THERMOSTAT["swing_band_C"], TARGET_C
 
     class StandIn:
-        """The few LabAPI parts the agent uses, with a clock set by the test (no lab, no box)."""
-        def __init__(self, state, run_id):
+        """The few lab parts the agent uses, with a clock and a room temperature set by the test (no lab, no box)."""
+        def __init__(self, state, run_id, room=25.0):
             self.state, self.run_id, self.clock, self.actor, self.control_calls = state, run_id, 0.0, "test", []
+            self.room = room
+
+        def get_temperature(self):
+            return {"room": self.room}
 
         def note(self, text, level="info"):
             self.state.add_note(self.run_id, self.clock, self.actor, level, text)
@@ -187,10 +212,10 @@ if __name__ == "__main__":
             state.add_temperature(run_id, t, kalman(t), kalman(t), aim(t), duty(t))
         return state, run_id
 
-    def play(rows: dict, alarms_at: dict | None = None, seconds: int = 2400) -> tuple[list, StandIn]:
+    def play(rows: dict, alarms_at: dict | None = None, seconds: int = 2400, room=25.0) -> tuple[list, StandIn]:
         """Run the agent every 60 s over made-up rows; alarms_at maps time -> alarms. Returns (topics, stand-in)."""
         state, run_id = make_run(**rows, seconds=seconds)
-        api = StandIn(state, run_id)
+        api = StandIn(state, run_id, room)
         agent = TemperatureAgent(api, state)
         for now in range(60, seconds + 1, 60):
             api.clock = float(now)
@@ -216,6 +241,20 @@ if __name__ == "__main__":
         print(f"{name:30} messages {topics}")
         assert [topic for _, topic in topics] == expect, topics
         assert api.control_calls == []
+
+    # Target vs room (the box can only cool): a new target above room - room_margin_C gets its own message;
+    # with the room temperature unknown only a note says the check was skipped.
+    from config import LAB_LIMITS
+    step = {"kalman": lambda t: target + (0.5 if t > 700 else 0.0), "aim": lambda t: target + (0.5 if t > 700 else 0.0)}
+    close_room = target + 0.5 + LAB_LIMITS["room_margin_C"] - 0.2
+    topics, api = play(step, room=close_room)
+    print(f"{'target 0.2 C too close to room':30} messages {topics}")
+    assert [topic for _, topic in topics] == ["target changed", "target too close to room"]
+    assert "can only cool" in api.state.query("SELECT text FROM messages WHERE topic = 'target too close to room'")[0]["text"]
+    topics, api = play(step, room=None)
+    skipped = api.state.query("SELECT actor, text FROM notes WHERE text LIKE '%room temperature unknown%'")
+    print(f"{'room temperature unknown':30} messages {topics}, notes {[n['text'] for n in skipped]}")
+    assert [topic for _, topic in topics] == ["target changed"] and skipped[0]["actor"] == "temperature_agent"
 
     # Control off: duty 0 and the box warm above the band -> set_control(on=True), never off.
     topics, api = play({"kalman": lambda t: target + (0.6 + 0.001 * (t - 600) if t > 600 else 0.0),

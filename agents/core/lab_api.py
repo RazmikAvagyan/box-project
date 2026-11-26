@@ -1,7 +1,13 @@
 """
-lab_api.py - the one door the future agents use to reach the simulated lab.
+lab_api.py - the lab interface every lab provides, and the simulated lab.
 
-LabAPI holds the fake optics lab (optics_simulation) and the temperature-controlled box
+Lab is the interface (the agents use nothing else, always through agents.core.safe_lab.SafeLab): wait, clock,
+get_temperature, get_status, set_target, set_control, measure_map, check_map, focus, note, actor, run_id, plus
+truth() (the true temperature, for plots only: on the simulated lab, None on a real one), get_log() and n_points (the
+camera points, None if unknown). Two labs implement it: SimLab here and real_lab.lab.RealLab (the real box).
+A hardware failure raises LabError; the team graph puts the lab in its safe state and goes on.
+
+SimLab (also called LabAPI, its old name) holds the fake optics lab (optics_simulation) and the temperature-controlled box
 (box_simulation.thermostat) on one shared clock. An agent can only do what an experimenter
 could: wait, read the thermometer (Kalman and raw, never the true temperature), change the
 box target, switch the control on or off, measure a map with GGS, check it and focus with it.
@@ -17,6 +23,7 @@ Row convention (as in lab.py): E_out = E_in @ X, (L x M) = (L x N) @ (N x M).
 from __future__ import annotations
 
 import time
+from abc import ABC, abstractmethod
 
 import numpy as np
 
@@ -27,8 +34,68 @@ from optics_simulation import ggs, lab, metrics
 SETTINGS = {**DRIFT_TEST, **LAB_API}   # same lab, camera, GGS, box and sample settings as drift_test
 
 
-class LabAPI:
-    """The simulated lab behind one interface; every call adds one line to the log."""
+class LabError(RuntimeError):
+    """A hardware error of a lab (box not answering, camera failure, ...)."""
+
+
+class Lab(ABC):
+    """The interface of every lab. Attributes: clock (lab time in s), actor (who acts now, written to the database),
+    run_id (the run in the lab database, or None), n_points (camera points, or None if unknown)."""
+
+    def __init__(self):
+        self.actor, self.run_id, self.n_points, self.log = "operator", None, None, []
+
+    def _log(self, text: str) -> None:
+        """Add one line 't=...s text' to the log."""
+        self.log.append(f"t={self.clock:.0f}s {text}")
+
+    def get_log(self) -> list[str]:
+        """All log lines so far, like 't=1200s check_map 0.871'."""
+        return list(self.log)
+
+    def truth(self) -> dict | None:
+        """{"T_true": true box temperature in C} for plots only; None when nobody knows it (a real lab)."""
+        return None
+
+    @abstractmethod
+    def wait(self, seconds: float) -> None:
+        """Let lab time pass."""
+
+    @abstractmethod
+    def get_temperature(self) -> dict:
+        """Thermometer in C: "kalman", "raw", "target" and "room" (None if unknown); never the true temperature."""
+
+    @abstractmethod
+    def get_status(self) -> dict:
+        """Time, Kalman temperature, target, control, duty, map age (s), last check_map value and last eta."""
+
+    @abstractmethod
+    def set_target(self, T: float) -> None:
+        """New box target in C."""
+
+    @abstractmethod
+    def set_control(self, on: bool) -> None:
+        """Switch the PID on or off."""
+
+    @abstractmethod
+    def measure_map(self) -> dict:
+        """Measure a new map; returns {"n_iter", "lab_time_s", "compute_time_s"}."""
+
+    @abstractmethod
+    def check_map(self) -> float:
+        """Prediction correlation of the stored map on the current sample."""
+
+    @abstractmethod
+    def focus(self, point: int) -> float:
+        """Focus on camera point `point` with the stored map; returns the enhancement eta."""
+
+    @abstractmethod
+    def note(self, text: str, level: str = "info") -> None:
+        """A note ("info" or "warning") in the log and the lab database."""
+
+
+class SimLab(Lab):
+    """The simulated lab behind the Lab interface; every call adds one line to the log."""
 
     def __init__(self, seed: int = 0, state=None, run_name: str = "run", box_settings: dict | None = None,
                  lab_settings: dict | None = None):
@@ -38,7 +105,9 @@ class LabAPI:
         box_settings: optional THERMOSTAT overrides for this lab only (e.g. other PID gains).
         lab_settings: optional OPTICS overrides for this lab only (e.g. time_drift_tau_min).
         """
+        super().__init__()
         s = self.s = SETTINGS
+        self.n_points = s["M"]
         self.fake = lab.FakeLab(
             N=s["N"], M=s["M"], seed=s["seed"] + seed,
             noise_level=s["noise_level"], bit_depth=s["bit_depth"], full_scale=s["full_scale"],
@@ -87,10 +156,6 @@ class LabAPI:
                 self.events.remove(event)
                 event[1]()
 
-    def _log(self, text: str) -> None:
-        """Add one line 't=...s text' to the log."""
-        self.log.append(f"t={self.clock:.0f}s {text}")
-
     def _record(self, t_s: float, action: str, args: dict, result) -> None:
         """Write one action (started at lab time t_s) to the lab database, if there is one, and commit."""
         if self.state is not None:
@@ -112,8 +177,10 @@ class LabAPI:
         self._record(t_start, "wait", {"seconds": seconds}, None)
 
     def get_temperature(self) -> dict:
-        """Last thermometer values in C: Kalman estimate, raw reading and the target (never the true temperature)."""
-        reading = {"kalman": float(self.box.x), "raw": float(self.box.z), "target": float(self.box.target)}
+        """Last thermometer values in C: Kalman estimate, raw reading, the target and the room sensor (never the true
+        box temperature)."""
+        reading = {"kalman": float(self.box.x), "raw": float(self.box.z), "target": float(self.box.target),
+                   "room": float(self.box.box.s["T_room"])}
         self._log(f"get_temperature kalman {reading['kalman']:.3f} raw {reading['raw']:.3f}")
         return reading
 
@@ -191,9 +258,12 @@ class LabAPI:
         self._log("get_status")
         return status
 
-    def get_log(self) -> list[str]:
-        """All log lines so far, like 't=1200s check_map 0.871'."""
-        return list(self.log)
+    def truth(self) -> dict:
+        """{"T_true": the true box temperature in C}, for plots and summaries only (never for an agent's decisions)."""
+        return {"T_true": self.box.T}
+
+
+LabAPI = SimLab                     # the old name of the simulated lab
 
 
 if __name__ == "__main__":
@@ -225,6 +295,9 @@ if __name__ == "__main__":
         print(f"  {line}")
 
     assert r1 > 0.8 and r3 > 0.8, "a fresh map should predict the speckle well"
+    # The interface: SimLab is a Lab; the true temperature only through truth(); the room sensor in the thermometer.
+    assert isinstance(api, Lab) and api.truth()["T_true"] == api.box.T and "T_true" not in api.get_temperature()
+    assert api.get_temperature()["room"] == api.box.box.s["T_room"]
     # Without control the box only warms toward T_room + P_internal / G (about 20.9 C), about +0.5 C in 30 min,
     # small against T_c = 1.6 C, so the old map keeps about 0.6. It must still count as stale [estimate].
     assert r2 < BASELINE["check_threshold"], "the old map should be stale after the box warmed up"

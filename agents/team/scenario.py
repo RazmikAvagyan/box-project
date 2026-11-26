@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
     import numpy as np
 
-    from agents.lab_api import LabAPI
+    from agents.core.lab_api import LabAPI
     from analysis import plots
     from box_simulation.thermostat import pid_gains, pid_label
     from config import PLOTS, THERMOSTAT
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     out = Path("results/scenario")
     # The messages of the Temperature agent come from a team run of the same seed and PID (the agents do not change
     # the box, so its temperatures are the ones above).
-    from agents import loop
+    from agents.map_agent import loop
     team = loop.run_team(seed=0, box_settings=pid_gains(main_pid), brain="rules", switches={"use_analyst": False})
     places = []
     print(plots.plot_scenario(t, T_true, T_kalman, target, T_room, events, out / "01_box_and_room_temperature.png",

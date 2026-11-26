@@ -9,8 +9,8 @@ alarm is active (obs["alarms"]). It reads only the lab database and the observat
 
 from __future__ import annotations
 
-from agents.state import LabState
-from agents.watchdog import last_map_time
+from agents.core.state import LabState
+from agents.map_agent.watchdog import last_map_time
 from config import LAB_API
 from config import SAFETY as SETTINGS
 

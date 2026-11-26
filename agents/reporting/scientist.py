@@ -17,8 +17,8 @@ A LangGraph graph: read -> questions -> plan -> run -> check -> write.
   write      results/report/report.md and report.json.
 The brain is chosen like the analyst's (AI_BRAIN provider, "fake" for tests, "rules"); code computes every number.
 
-python -m agents.scientist          the real run (rules brain unless an API key is set), writes results/report/
-python -m agents.scientist --test   self-test with a fake brain (scripted replies), output in a temporary folder
+python -m agents.reporting.scientist          the real run (rules brain unless an API key is set), writes results/report/
+python -m agents.reporting.scientist --test   self-test with a fake brain (scripted replies), output in a temporary folder
 """
 
 from __future__ import annotations
@@ -444,7 +444,7 @@ def ask(state: ScientistState, prompt: str) -> dict:
     if state["brain"] == "fake":
         reply = state["replies"].pop(0)
     else:
-        from agents.brain import chat_model
+        from agents.core.brain import chat_model
         from env import load_env
         load_env()
         key = os.environ.get(AI_BRAIN["key_env"][state["brain"]])

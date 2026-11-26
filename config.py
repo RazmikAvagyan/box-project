@@ -147,6 +147,9 @@ AGENT_LOOP = {
     # Stale relative to what a fresh map reaches now (off: stale = check < BASELINE check_threshold, as before).
     "use_fresh_level": True,
     "use_messages": True,          # the Map agent reads the Temperature agent's messages (team.py); off = it ignores them
+    # The Map agent computes "stable" from the thermometer rows itself; False (only with use_messages): the box counts as
+    # stable unless a "box unstable" or "cooler problem" message from the Temperature agent is open.
+    "own_stability_check": True,
     "use_analyst": True,           # data_analyst.py analyses the lab database at the end of loop.run / loop.run_team
     "analyst_max_tool_calls": 8,   # the analyst's AI may call at most this many analysis tools per run [estimate]
     "fresh_n": 3,                  # fresh level = median verify check of the last fresh_n new maps [estimate]
@@ -181,6 +184,16 @@ PREDICTION = {
     "margin": 0.05,                # skip check_map only if predicted > check_threshold + margin [estimate]
     "max_error": 0.05,             # |check - predicted| above this is a bad prediction [estimate]
     "max_bad": 2,                  # after this many bad predictions, always check for the rest of the run [estimate]
+    # The staleness formula (agents/map_agent/staleness.py): "gaussian" (the original form), "exponential", "stretched", any of
+    # them with " + time", or "auto" (the form the data analyst chose for the same setup, gaussian if none yet).
+    "form": "gaussian",
+    "beta_range": (0.5, 3.0),      # the stretched form's beta is fitted in this range (1 = exponential, 2 = gaussian)
+    "beta_step": 0.05,             # grid step of beta
+    "time_min_points": 25,         # checks needed before the time term exp(-dt/tau) is tried [estimate: with 20 checks and no
+                                   # time drift the time term still won by a score margin of 2, within noise]
+    "time_min_spread_s": 300,      # s, the checks' times since the map must spread this much for the time term [estimate]
+    "penalty_per_param": 2.0,      # score = n ln(leave-one-out MSE) + this per parameter (as in AIC)
+    "forms_file": "results/analysis/staleness_forms.json",   # the chosen form per setup, written by the data analyst
 }
 
 ANALYST = {
@@ -208,7 +221,7 @@ SCIENTIST = {
 
 AI_BRAIN = {
     "provider": "fake",            # "claude" | "gemini" | "openai" | "fake" (no network) | "rules"
-    "test_provider": "claude",     # real provider the agents.loop self-test also runs when its key is found
+    "test_provider": "claude",     # real provider the agents.map_agent.loop self-test also runs when its key is found
     "models": {
         "claude": "claude-sonnet-5-5",   # [source: Anthropic model list, 2026-11]
         "gemini": "gemini-3.8-flash",    # [source: ai.google.dev/gemini-api/docs/models, 2026-11: recommended for new projects]
@@ -243,12 +256,14 @@ PLOTS = {
 COMPARE = {
     "seeds": list(range(10)),      # full run (python -m experiments.compare full): every seed of LabAPI
     "test_seeds": [0, 1],          # self-test (python -m experiments.compare)
-    "operators": ["never", "rules", "basic", "full", "team"],   # basic / full Map agent: rules brain, fresh level on;
-                                                                  # team: Temperature agent + full Map agent (team.py)
+    "operators": ["never", "rules", "basic", "full", "team", "team_no_own_check"],
+    # basic / full Map agent: rules brain, fresh level on; team: Temperature agent + full Map agent (team.py);
+    # team_no_own_check: the team with AGENT_LOOP own_stability_check False (the Map agent relies on the messages)
     "time_drift_taus": [None, 120, 30],   # min, the full run is repeated for each (None = no time drift of the sample) [estimate]
     "after_cooler_s": 600,         # s, "mean eta after the cooler is back" is taken over this time [estimate: 10 min]
     "se_factor": 2.0,              # a difference is real only if |mean paired difference| > this many standard errors
     "out_dir": "results/compare",
+    "form_calibration_seed": 100,  # "forms" mode: the run whose analysis chooses the staleness form of a setup (not a test seed)
 }
 
 REAL_BOX = {
@@ -264,6 +279,35 @@ REAL_BOX = {
     "print_every_s": 30,                                 # s, one status line this often
     "ca_file": "/etc/ssl/cert.pem",                      # macOS CA bundle; the python.org Python has none of its own
     "user_agent": "real-box-logger",                     # the room server answers 403 to the default Python-urllib agent
+    # Write paths of the box web API on the host of BOX_URL, JSON {"target": T} and {"on": true/false} (real_lab/lab.py)
+    # [estimate: only GET /api/status is known; check these on the box web page before the first real run]
+    "target_path": "/api/target",
+    "control_path": "/api/control",
+}
+
+LAB_LIMITS = {
+    "target_min_C": 15.0,          # C, lowest box target anyone may set (agents.core.safe_lab) [estimate]
+    "target_max_C": 30.0,          # C, highest box target anyone may set [estimate]
+    "room_margin_C": 0.5,          # C, a target above room - this gets a warning: the box can only cool [estimate: the box
+                                   # holds 20.0 C in a 20.8 C room at about 10 % cooler duty, so 1.0 warned in normal use]
+    "max_errors": 3,               # hardware errors in one team run before it stops cleanly (agents.team.team) [estimate]
+}
+
+MCP = {
+    "lab": "sim",                  # "sim" (the simulated lab) or "real" (RealLab, needs BOX_URL in .env)
+    "role": "operator",            # the SafeLab role of the MCP client (agents/core/safe_lab.py PERMISSIONS)
+    "pid": "real",                 # the simulated lab's PID: "real" (PID 200/4) or a PID_TUNING name, e.g. "refined"
+                                   # (3000/0.36); ignored for the real lab
+    "max_wait_s": 600,             # s, longest wait one tool call may ask for [estimate]
+    "seed": 0,                     # seed of the simulated lab
+    "run_name": "mcp_server",      # the server's run in the lab database (its actions and notes)
+    "report": "results/report/report.md",    # the Scientist report, served as a resource
+    "note_max_chars": 300,         # a tool's result is cut to this length in its note
+}
+
+HUMAN = {
+    "mode": "off",                 # "off" (no human), "suggest" (every action waits), "approve_big" (agents.core.human)
+    "timeout_s": 300,              # s, no answer in the terminal = refused [estimate]
 }
 
 FIT_REAL_BOX = {
@@ -301,7 +345,7 @@ PID_TUNING = {
     "Ki": [0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0],
     "Kd": 40.0,                        # [source: first search, Kd 0 to 1000 gave the same results; the firmware D term uses the change per 50 ms loop, which is tiny]
     "compare": [(800.0, 0.5, 40.0), (200.0, 4.0, 40.0)],   # PIDs of the real tests [source: real box tests 2026-11-18]
-    # "What if" PID for the agents.loop self-test only; THERMOSTAT keeps the gains the real box runs today.
+    # "What if" PID for the agents.map_agent.loop self-test only; THERMOSTAT keeps the gains the real box runs today.
     "refined": (3000.0, 0.36, 40.0),   # [source: results/real_box/pid_tuning/results.csv, row "refined"]
     "first_search": (800.0, 0.5, 40.0),   # best of the first grid search, run on the real box in test 3 [source: PID_TUNING compare, real box test 2026-11-18]
     # Hold cases, each duration_s after warmup_s at 20 C: (name, room C) [source: real box test 2026-11-18, 20 C hold; estimate: warm room 20.8 + 3]

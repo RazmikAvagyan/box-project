@@ -7,16 +7,18 @@ photo every step_s. Two policies:
 - "rules": every check_every_s it checks the map and measures a new one if check_map is below
   check_threshold; if the Kalman temperature stays more than swing_band_C from the target for longer
   than warn_after_s, it writes one warning line to the log (the rules cannot fix the box).
-The policy only uses LabAPI; the true temperature is recorded for the plot and the summary only.
+The policy only uses the lab interface, through SafeLab with the operator role; the true temperature (lab.truth(),
+None on a real lab) is recorded for the plot and the summary only.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from agents import scenario
-from agents.lab_api import LabAPI
-from agents.state import LabState
+from agents.team import scenario
+from agents.core.lab_api import LabAPI
+from agents.core.safe_lab import SafeLab
+from agents.core.state import LabState
 from config import BASELINE as SETTINGS
 from config import DRIFT_TEST, SCENARIO, STATE, THERMOSTAT
 
@@ -36,44 +38,48 @@ def run(policy: str, seed: int = 0, state=None, box_settings: dict | None = None
     api = LabAPI(seed=seed, state=state, run_name=policy, box_settings=box_settings, lab_settings=lab_settings)
     api.actor = policy
     scenario.add_events(api)
-    api.measure_map()
+    lab = SafeLab(api, policy, role="operator")      # the policy's door to the lab
+    lab.measure_map()
     rec = {k: [] for k in ["t_s", "eta", "kalman", "T_true", "target", "measured", "checked"]}
     lab_time, warnings = 0.0, 0
-    last_check, out_since, warned = api.clock, None, False
+    last_check, out_since, warned = lab.clock, None, False
 
     for k in range(1, int(SCENARIO["duration_s"] // s["step_s"]) + 1):
         # Each step starts on the step_s grid (later only if the last step's work took longer).
-        if api.clock < k * s["step_s"]:
-            api.wait(k * s["step_s"] - api.clock)
-        t_step = api.clock
-        eta = api.focus(DRIFT_TEST["focus_target"])
-        reading = api.get_temperature()
+        if lab.clock < k * s["step_s"]:
+            lab.wait(k * s["step_s"] - lab.clock)
+        t_step = lab.clock
+        eta = lab.focus(DRIFT_TEST["focus_target"])
+        reading = lab.get_temperature()
         measured = checked = False
 
         if policy == "rules":
-            if api.clock - last_check >= s["check_every_s"]:
-                t0 = api.clock
+            if lab.clock - last_check >= s["check_every_s"]:
+                t0 = lab.clock
                 checked = True
-                if api.check_map() < s["check_threshold"]:
-                    api.measure_map()
+                if lab.check_map() < s["check_threshold"]:
+                    lab.measure_map()
                     measured = True
-                lab_time += api.clock - t0
-                last_check = api.clock
+                lab_time += lab.clock - t0
+                last_check = lab.clock
             if abs(reading["kalman"] - reading["target"]) > THERMOSTAT["swing_band_C"]:
                 out_since = t_step if out_since is None else out_since
                 if not warned and t_step - out_since > s["warn_after_s"]:
-                    api.note(f"box {reading['kalman'] - reading['target']:+.3f} C from target "
+                    lab.note(f"box {reading['kalman'] - reading['target']:+.3f} C from target "
                              f"for {t_step - out_since:.0f} s; the rules cannot fix this", level="warning")
                     warnings += 1
                     warned = True
             else:
                 out_since, warned = None, False
 
-        for key, value in [("t_s", t_step), ("eta", eta), ("kalman", reading["kalman"]), ("T_true", api.box.T),
-                           ("target", reading["target"]), ("measured", measured), ("checked", checked)]:
+        truth = lab.truth()
+        for key, value in [("t_s", t_step), ("eta", eta), ("kalman", reading["kalman"]),
+                           ("T_true", None if truth is None else truth["T_true"]), ("target", reading["target"]),
+                           ("measured", measured), ("checked", checked)]:
             rec[key].append(value)
 
-    out = {key: np.array(values) for key, values in rec.items()}
+    # T_true is None (nan) on a lab that does not know it.
+    out = {key: np.array(values, dtype=float if key == "T_true" else None) for key, values in rec.items()}
     out.update({"lab_time_s": lab_time, "warnings": warnings, "api": api})
     return out
 

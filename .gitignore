@@ -11,3 +11,4 @@ CLAUDE.md
 results/lab_state.sqlite
 results/export/
 .env
+.env.example
