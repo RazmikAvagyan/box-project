@@ -36,8 +36,13 @@ def get_json(url: str, timeout: float) -> dict:
 
 
 def read_room(url: str, channel: str, timeout: float) -> dict:
-    """Latest sample of the named room channel as the ROOM_FIELDS dict; sample time in local clock time."""
-    latest = next(c for c in get_json(url, timeout)["channels"] if c["name"] == channel)["latest"]
+    """Latest sample of the named room channel as the ROOM_FIELDS dict; sample time in local clock time.
+    Raises ValueError (with the channel names the server has) if the channel is missing."""
+    channels = get_json(url, timeout)["channels"]
+    match = [c for c in channels if c["name"] == channel]
+    if not match:
+        raise ValueError(f"room channel {channel!r} not found; channels: {[c['name'] for c in channels]}")
+    latest = match[0]["latest"]
     at = datetime.fromisoformat(latest["at"].replace("Z", "+00:00")).astimezone()
     return {"room_temp": latest["temperature"], "room_probe_temp": latest["external_temperature"],
             "room_humidity": latest["humidity"], "room_sample_time": at.strftime("%Y-%m-%d %H:%M:%S")}

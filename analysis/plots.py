@@ -739,6 +739,25 @@ def plot_kalman_summary(
     return _save(fig, path)
 
 
+def plot_hardware_test(blank: np.ndarray, pattern: np.ndarray, path: str | Path, title: str) -> Path:
+    """Two camera frames (h, w) uint8 of the hardware test, blank SLM and test pattern, on one 0..255 scale, and their
+    difference (pattern - blank) on a symmetric scale; one colorbar per quantity."""
+    fig, axes = plt.subplots(1, 3, figsize=(FIGSIZE[0], 0.8 * FIGSIZE[1]), layout="constrained")
+    fig.suptitle(title)
+    diff = pattern.astype(float) - blank.astype(float)
+    for ax, image, name in [(axes[0], blank, "camera, blank SLM"), (axes[1], pattern, "camera, test pattern")]:
+        im = _show_image(ax, image, 0, 255)
+        ax.set_title(f"{name}\nmean {image.mean():.1f}, max {image.max():.0f}", fontsize=10)
+    fig.colorbar(im, ax=axes[:2], shrink=0.8, label="camera counts (8 bit)")
+    span = max(float(np.abs(diff).max()), 1.0)
+    im = axes[2].imshow(diff, cmap="RdBu_r", vmin=-span, vmax=span)
+    axes[2].set_xticks([])
+    axes[2].set_yticks([])
+    axes[2].set_title(f"difference (pattern - blank)\nmean |diff| {np.abs(diff).mean():.1f}", fontsize=10)
+    fig.colorbar(im, ax=axes[2], shrink=0.8, label="difference (counts)")
+    return _save(fig, path)
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -825,6 +844,9 @@ if __name__ == "__main__":
                                  "PID b": {"Kalman": (hold["t_s"], hold["T_true"], hold["target"], hold["duty"] / 10.23)}},
                                 {"PID a": (10.0, 40.0), "PID b": (5.0, 30.0)}, out / "kalman_summary.png",
                                 "Kalman filter: same temperature, much calmer cooler"),
+            plot_hardware_test(np.full((96, 96), 20, dtype=np.uint8),
+                               np.random.default_rng(0).integers(0, 255, (96, 96)).astype(np.uint8),
+                               out / "hardware_test.png", "Hardware test"),
         ]
         for p in paths:
             assert p.exists() and p.stat().st_size > 0, f"{p.name} is missing or empty"

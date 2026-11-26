@@ -2,7 +2,9 @@
 lab.py - RealLab: the real box behind the same interface as the simulated lab (agents.core.lab_api.Lab).
 
 The thermometer, the status, set_target and set_control talk to the box web API (REAL_BOX "url" = BOX_URL from .env,
-the status JSON; the write paths REAL_BOX "target_path" and "control_path" on the same host); the room temperature
+the status JSON; targets are POSTed as {"target": T} to REAL_BOX "target_path" on the same host). The box has no on/off
+endpoint: set_control(False) sets REAL_BOX "off_target_C" (above the box temperature, so the cooler stays idle, PWM 0)
+and keeps the last target; set_control(True) sets that target back. The PID gains are never written. The room temperature
 comes from ROOM_URL (the room channel, read at most every room_interval_s). The SLM and the camera are not connected
 yet: measure_map, check_map and focus raise NotImplementedError. wait() uses the wall clock and writes a thermometer
 row to the lab database every STATE temperature_every_s, as the simulated lab does. truth() is None: nobody knows the
@@ -44,6 +46,7 @@ class RealLab(Lab):
         self.state = state
         self.run_id = None if state is None else state.start_run(run_name, 0, {"box_url": "BOX_URL from .env"})
         self.last_row_t = -float("inf")
+        self.target = None                         # the last target set (restored by set_control(True))
 
     @property
     def clock(self) -> float:
@@ -129,15 +132,30 @@ class RealLab(Lab):
         self._log("get_status")
         return status
 
-    def set_target(self, T: float) -> None:
-        """New box target in C (POST to target_path)."""
+    def _post_target(self, T: float) -> None:
+        """POST {"target": T} to target_path."""
         self._request(urljoin(self.box_url, self.s["target_path"]), {"target": T})
+
+    def set_target(self, T: float) -> None:
+        """New box target in C (POST to target_path); remembered for set_control(True)."""
+        self._post_target(T)
+        self.target = T
         self._log(f"set_target {T:g}")
         self._record(self.clock, "set_target", {"T": T}, None)
 
     def set_control(self, on: bool) -> None:
-        """PID on or off (POST to control_path)."""
-        self._request(urljoin(self.box_url, self.s["control_path"]), {"on": bool(on)})
+        """Control off: target off_target_C (the cooler stays idle), the last target is kept; on: the last target back.
+        Without a known target (none set and the box already at off_target_C) switching on raises LabError."""
+        if self.target is None:
+            current = float(self._box()["target"])
+            if current != self.s["off_target_C"]:
+                self.target = current
+        if on:
+            if self.target is None:
+                raise LabError("control on: no target to restore (the box is at the off target); set_target first")
+            self._post_target(self.target)
+        else:
+            self._post_target(self.s["off_target_C"])
         self._log(f"set_control {'on' if on else 'off'}")
         self._record(self.clock, "set_control", {"on": on}, None)
 
@@ -168,7 +186,7 @@ if __name__ == "__main__":
     requests = []
 
     class StandInBox(BaseHTTPRequestHandler):
-        """GET /api/status and /room; POST the target and control paths (the target changes the status)."""
+        """GET /api/status and /room; POST {"target": T} to the target path changes the status; other POSTs get 404."""
 
         def _send(self, body: dict) -> None:
             data = json.dumps(body).encode()
@@ -185,8 +203,11 @@ if __name__ == "__main__":
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(("POST", self.path, body))
-            if self.path == REAL_BOX["target_path"]:
-                box["target"] = body["target"]
+            if self.path != REAL_BOX["target_path"]:                # the box has no other write path we use
+                self.send_response(404)
+                self.end_headers()
+                return
+            box["target"] = body["target"]
             self._send({})
 
         def log_message(self, *args):
@@ -207,12 +228,26 @@ if __name__ == "__main__":
 
     # Through SafeLab as the operator: a target above room - margin is sent, with a warning note.
     operator = SafeLab(lab, "operator")
-    operator.set_target(20.5)
+    from config import LAB_LIMITS
+    near_room = round(room["channels"][0]["latest"]["temperature"] - LAB_LIMITS["room_margin_C"] + 0.1, 6)
+    operator.set_target(near_room)
     operator.set_control(True)
     posts = [(path, body) for kind, path, body in requests if kind == "POST"]
     print(f"POSTs: {posts}")
-    assert posts == [(REAL_BOX["target_path"], {"target": 20.5}), (REAL_BOX["control_path"], {"on": True})]
-    assert lab.get_temperature()["target"] == 20.5
+    assert posts == [(REAL_BOX["target_path"], {"target": near_room}), (REAL_BOX["target_path"], {"target": near_room})]
+    assert lab.get_temperature()["target"] == near_room
+
+    # Control off, then on: the box gets the off target (cooler idle), then the remembered target back.
+    operator.set_control(False)
+    assert lab.get_temperature()["target"] == REAL_BOX["off_target_C"]
+    operator.set_control(True)
+    off_on = [(path, body) for kind, path, body in requests if kind == "POST"][-2:]
+    print(f"off, then on: {off_on}")
+    assert off_on == [(REAL_BOX["target_path"], {"target": REAL_BOX["off_target_C"]}),
+                      (REAL_BOX["target_path"], {"target": near_room})]
+    assert lab.get_temperature()["target"] == near_room
+    assert [a["args"] for a in state.query("SELECT args FROM actions WHERE action = 'set_control'")] == \
+        ['{"on": true}', '{"on": false}', '{"on": true}']
     warnings = state.query("SELECT actor, text FROM notes WHERE level = 'warning'")
     assert len(warnings) == 1 and "can only cool" in warnings[0]["text"] and warnings[0]["actor"] == "operator"
 
@@ -229,7 +264,7 @@ if __name__ == "__main__":
     lab.wait(1.5)
     rows = state.query("SELECT * FROM temperatures")
     print(f"wait(1.5): {lab.clock - t0:.2f} s of wall clock, {len(rows)} thermometer rows")
-    assert lab.clock - t0 >= 1.5 and len(rows) >= 2 and rows[-1]["target"] == 20.5
+    assert lab.clock - t0 >= 1.5 and len(rows) >= 2 and rows[-1]["target"] == near_room
 
     # Room unknown: the target vs room check is skipped with a note. Box down: LabError.
     no_room = RealLab(state, "real_lab_test_no_room", box_url=f"{base}/api/status", room_url="")

@@ -50,6 +50,8 @@ The recovered map is then tested by focusing light through the sample and under 
 - `mcp_server/` — `server.py`, the MCP server of the lab (see "The MCP server" below).
 - `real_lab/` — the real box:
   - `lab.py` — `RealLab`, the real box behind the same lab interface: thermometer, status, target and control through the box web API (`BOX_URL`), the room from `ROOM_URL`, the wall clock for `wait`; the SLM and camera methods raise `NotImplementedError("needs the real SLM/camera")` for now. Its self-test uses a stand-in web server on 127.0.0.1 and never contacts the box.
+  - `hardware.py` — the real SLM (Meadowlark PCIe 1024 × 1024, Blink Plus SDK through ctypes) and camera (Alkeria Celera C5S-MP, `alkusb3`) as `SLM` and `Camera` context managers (open, show/grab, close; every SDK return checked, `HardwareError` with the SDK's message; always closed: SLM blank and off, camera acquisition off). `fake=True`, or any machine that is not Windows, gives fake devices. Settings in `HARDWARE`; based on the lab's utils.py and Meadowlark's Blink_SDK_example.py. The external trigger is an option, off for now. `RealLab`'s map methods do not use it yet.
+  - `hardware_test.py` — blank SLM and a phase ramp, one camera frame each; saves the frames, their difference (PNG) and the raw arrays (.npz) in results/real_box/hardware_test/<date_time>/ (`--fake`: the fake devices, saved in results/hardware_test_fake/, not committed).
   - `logger.py` — logs (read-only, GET requests only) the EDO thermostat (`/api/status`) every 2 s and the lab room (`biglab`) every 60 s to results/real_box/test_<date>_<time>.csv.
   - `plot_test.py` — plots one logged CSV (box, target, room, probe, cooler power, target changes) as a PNG next to it.
 - `results/` — generated plots and data.
@@ -73,6 +75,7 @@ Install: `pip install -r requirements.txt` (numpy, matplotlib, and LangChain / L
     python -m agents.core.safe_lab                  # self-test of every permission and limit (stand-in lab)
     python -m agents.core.human                     # self-test of the human modes (scripted approvers, in-memory database)
     python -m real_lab.lab                          # self-test of RealLab with a stand-in web server (no network)
+    python -m real_lab.hardware                     # self-test of the SLM / camera layer with the fake devices
     python -m mcp_server.server --test              # MCP server self-test: every tool in-process, simulated lab, no network
     python -m agents.team.scenario                  # 2-hour scenario without operator, writes results/scenario/
     python -m agents.team.baseline                  # fixed-rule operator vs. doing nothing, writes results/baseline/ and results/lab_state.sqlite
@@ -104,6 +107,7 @@ internet; `"rules"` gives the old rules notes).
 Real box (the Mac must be on the lab Wi-Fi; set `BOX_URL` and `ROOM_URL` in `.env` first; stop the logger with Ctrl+C):
 
     python -m real_lab.logger                                             # writes results/real_box/test_<date>_<time>.csv
+    python -m real_lab.hardware_test        # lab PC: SLM + camera check (laser by hand, goggles); --fake anywhere
     python -m real_lab.plot_test results/real_box/test_<date>_<time>.csv  # saves the .png next to the CSV
     python -m analysis.fit_real_box                                       # fit the box model to the real test, writes results/real_box/fit/
 
@@ -114,8 +118,10 @@ Real box (the Mac must be on the lab Wi-Fi; set `BOX_URL` and `ROOM_URL` in `.en
   API, room temperature from the room server, wall-clock `wait`; no SLM or camera yet). The agents use only the
   interface, so the same agents can run on either. The true temperature exists only on the simulated lab, through
   `truth()` (for plots and summaries, never for decisions); on the real lab it is None and the plots leave that line out.
-  The write paths of the box web API (`REAL_BOX["target_path"]`, `["control_path"]`) are estimates: check them on the
-  box web page before the first real run.
+  The box web API takes a new target as POST `/api/set` `{"target": T}` (`REAL_BOX["target_path"]`, checked on the box
+  web page on 2026-11-26). It has no on/off switch, so `set_control(False)` sets `REAL_BOX["off_target_C"]` (30 °C,
+  above the box temperature: the cooler stays idle) and keeps the last target, and `set_control(True)` sets it back.
+  The PID gains (`/api/pid`) are never written.
 - **Permissions in one place.** Every agent reaches the lab through `SafeLab(lab, actor)`: the Map agent may wait, read,
   measure_map, check_map and focus; the Temperature agent may wait, read and switch the control on (never off); the
   operator may do everything. For everyone, the target stays within `LAB_LIMITS["target_min_C"]` .. `["target_max_C"]`

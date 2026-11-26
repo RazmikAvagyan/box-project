@@ -266,23 +266,32 @@ COMPARE = {
     "form_calibration_seed": 100,  # "forms" mode: the run whose analysis chooses the staleness form of a setup (not a test seed)
 }
 
-REAL_BOX = {
-    "url": os.environ.get("BOX_URL", ""),                # box JSON (GET only); set in .env, see .env.example
-    "interval_s": 2,                                     # s, one box row this often
-    "room_url": os.environ.get("ROOM_URL", ""),          # room JSON, all channels (GET only); set in .env, see .env.example
-    "room_channel": "biglab",                            # the room channel of the box
-    "room_interval_s": 60,                               # s, room read this often (new samples every ~5-10 min)
-    "out_dir": "results/real_box",
-    "duty_max": 1023,                                    # 10-bit PWM full scale [source: box web page]
-    "timeout_s": 1.5,                                    # s, box request timeout (shorter than interval_s)
-    "room_timeout_s": 20,                                # s, room request timeout (the response holds 7 days of history)
-    "print_every_s": 30,                                 # s, one status line this often
-    "ca_file": "/etc/ssl/cert.pem",                      # macOS CA bundle; the python.org Python has none of its own
-    "user_agent": "real-box-logger",                     # the room server answers 403 to the default Python-urllib agent
-    # Write paths of the box web API on the host of BOX_URL, JSON {"target": T} and {"on": true/false} (real_lab/lab.py)
-    # [estimate: only GET /api/status is known; check these on the box web page before the first real run]
-    "target_path": "/api/target",
-    "control_path": "/api/control",
+HARDWARE = {
+    # SLM: Meadowlark PCIe, 1024 x 1024, Blink Plus SDK through ctypes (real_lab/hardware.py) [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_wrapper": r"C:\Program Files\Meadowlark Optics\Blink Plus\SDK\Blink_C_wrapper",   # [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_lut": r"C:\Program Files\Meadowlark Optics\Blink Plus\LUT Files\slm6914_at532.lut",  # [source: lab PC config4, 2026-11-26]
+    "slm_board": 1,                # [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_timeout_ms": 5000,        # ms, Write_image and ImageWriteComplete [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_size": (1024, 1024),      # (height, width) of the SLM, also the fake SLM's size [source: lab PC config4 / utils.py, 2026-11-26]
+    # Camera: Alkeria Celera C5S-MP over USB3, Python module alkusb3 (on the lab PC) [source: lab PC config4 / utils.py, 2026-11-26]
+    "camera_index": 0,             # [source: lab PC config4 / utils.py, 2026-11-26]
+    "image_start_x": 1136,         # px, window corner [source: lab PC config4 / utils.py, 2026-11-26]
+    "image_start_y": 932,          # px [source: lab PC config4 / utils.py, 2026-11-26]
+    "image_size_x": 96,            # px, window width [source: lab PC config4 / utils.py, 2026-11-26]
+    "image_size_y": 96,            # px, window height [source: lab PC config4 / utils.py, 2026-11-26]
+    "video_mode": 1,               # [source: lab PC config4 / utils.py, 2026-11-26]
+    "adc_resolution": 8,           # bits [source: lab PC config4 / utils.py, 2026-11-26]
+    "digital_gain": 1024,          # [source: lab PC config4 / utils.py, 2026-11-26]
+    "color_coding": "raw8",        # alkusb3.color_coding.raw8 [source: lab PC config4 / utils.py, 2026-11-26]
+    "shutter": 4000,               # [source: lab PC config4 / utils.py, 2026-11-26]
+    "frame_rate": 800,             # [source: lab PC config4 / utils.py, 2026-11-26]
+    # External trigger: SLM output pulse -> camera input 1 with delay 3000 [source: lab PC config4 / utils.py, 2026-11-26]; off for now
+    "trigger": False,
+    "trigger_input": 1,            # [source: lab PC config4 / utils.py, 2026-11-26]
+    "trigger_delay": 3000,         # [source: lab PC config4 / utils.py, 2026-11-26]
+    "settle_s": 0.05,              # s, wait after an SLM image before a camera frame [source: lab PC config4 / utils.py, 2026-11-26]
+    "out_dir": "results/real_box/hardware_test",      # hardware_test.py with the real devices
+    "fake_out_dir": "results/hardware_test_fake",     # hardware_test.py with the fake devices (not committed)
 }
 
 LAB_LIMITS = {
@@ -291,6 +300,28 @@ LAB_LIMITS = {
     "room_margin_C": 0.5,          # C, a target above room - this gets a warning: the box can only cool [estimate: the box
                                    # holds 20.0 C in a 20.8 C room at about 10 % cooler duty, so 1.0 warned in normal use]
     "max_errors": 3,               # hardware errors in one team run before it stops cleanly (agents.team.team) [estimate]
+}
+
+REAL_BOX = {
+    "url": os.environ.get("BOX_URL", ""),                # box JSON (GET only); set in .env, see .env.example
+    "interval_s": 2,                                     # s, one box row this often
+    "room_url": os.environ.get("ROOM_URL", ""),          # room JSON, all channels (GET only); set in .env, see .env.example
+    "room_channel": "BiglabTable1",                      # the room sensor about 30 cm from the box [source: the room
+                                                         # server renamed its channels on 2026-11-26; "biglab" before]
+    "room_interval_s": 60,                               # s, room read this often (new samples every ~5-10 min)
+    "out_dir": "results/real_box",
+    "duty_max": 1023,                                    # 10-bit PWM full scale [source: box web page]
+    "timeout_s": 1.5,                                    # s, box request timeout (shorter than interval_s)
+    "room_timeout_s": 20,                                # s, room request timeout (the response holds 7 days of history)
+    "print_every_s": 30,                                 # s, one status line this often
+    "ca_file": "/etc/ssl/cert.pem",                      # macOS CA bundle; the python.org Python has none of its own
+    "user_agent": "real-box-logger",                     # the room server answers 403 to the default Python-urllib agent
+    # Write path of the box web API on the host of BOX_URL, JSON {"target": T} (real_lab/lab.py) [source: box web page,
+    # 2026-11-26]. The box also has POST /api/pid {"kp", "ki", "kd"}, not used here, and no on/off endpoint.
+    "target_path": "/api/set",
+    # No off switch on the box: "control off" sets this target, above the box temperature, so the cooler stays idle
+    # (PWM 0); "control on" sets the remembered target back.
+    "off_target_C": LAB_LIMITS["target_max_C"],
 }
 
 MCP = {

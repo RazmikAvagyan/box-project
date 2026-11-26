@@ -12,3 +12,4 @@ results/lab_state.sqlite
 results/export/
 .env
 .env.example
+results/hardware_test_fake/
