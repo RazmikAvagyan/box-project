@@ -267,12 +267,14 @@ COMPARE = {
 }
 
 HARDWARE = {
-    # SLM: Meadowlark PCIe, 1024 x 1024, Blink Plus SDK through ctypes (real_lab/hardware.py) [source: lab PC config4 / utils.py, 2026-11-26]
-    "slm_wrapper": r"C:\Program Files\Meadowlark Optics\Blink Plus\SDK\Blink_C_wrapper",   # [source: lab PC config4 / utils.py, 2026-11-26]
+    # SLM: Meadowlark PCIe, 1024 x 1024, SDK build 870 through ctypes (real_lab/hardware.py) [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_sdk_api": "blink_pcie_870",   # [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_wrapper": r"C:\Users\photonicsai\Desktop\tm_engineering\vendor\meadowlark_pcie_870\Blink_C_wrapper.dll",  # [source: lab PC config4 / utils.py, 2026-11-26]
     "slm_lut": r"C:\Program Files\Meadowlark Optics\Blink Plus\LUT Files\slm6914_at532.lut",  # [source: lab PC config4, 2026-11-26]
     "slm_board": 1,                # [source: lab PC config4 / utils.py, 2026-11-26]
     "slm_timeout_ms": 5000,        # ms, Write_image and ImageWriteComplete [source: lab PC config4 / utils.py, 2026-11-26]
     "slm_size": (1024, 1024),      # (height, width) of the SLM, also the fake SLM's size [source: lab PC config4 / utils.py, 2026-11-26]
+    "slm_flip_immediate": False,   # SetFlipImmediate [source: lab PC config4 / utils.py, 2026-11-26]
     # Camera: Alkeria Celera C5S-MP over USB3, Python module alkusb3 (on the lab PC) [source: lab PC config4 / utils.py, 2026-11-26]
     "camera_index": 0,             # [source: lab PC config4 / utils.py, 2026-11-26]
     "image_start_x": 1136,         # px, window corner [source: lab PC config4 / utils.py, 2026-11-26]
@@ -285,10 +287,15 @@ HARDWARE = {
     "color_coding": "raw8",        # alkusb3.color_coding.raw8 [source: lab PC config4 / utils.py, 2026-11-26]
     "shutter": 4000,               # [source: lab PC config4 / utils.py, 2026-11-26]
     "frame_rate": 800,             # [source: lab PC config4 / utils.py, 2026-11-26]
-    # External trigger: SLM output pulse -> camera input 1 with delay 3000 [source: lab PC config4 / utils.py, 2026-11-26]; off for now
-    "trigger": False,
-    "trigger_input": 1,            # [source: lab PC config4 / utils.py, 2026-11-26]
-    "trigger_delay": 3000,         # [source: lab PC config4 / utils.py, 2026-11-26]
+    "warmup_frames": 2,            # frames dropped after the camera is opened [source: lab PC config4 / utils.py, 2026-11-26]
+    # External trigger: SLM output pulse on each flip -> camera input 1 with delay 3000 [source: lab PC config4 / utils.py, 2026-11-26]
+    "trigger": True,               # camera frame start on the external input and SLM output pulse on each flip, as in the
+                                   # lab's working setup (SLM output_pulse_image_flip 1, wait_for_trigger 0) [source: lab PC config4, 2026-11-26];
+                                   # False: free-running camera, no SLM pulse (hardware_test.py --no-trigger)
+    "trigger_input": 1,            # camera external input [source: lab PC config4 / utils.py, 2026-11-26]
+    "trigger_edge": True,          # camera detect_external_input_edge (a plain bool) [source: lab PC config4, 2026-11-26]
+    "trigger_debounce": 0,         # camera debounce_time [source: lab PC config4, 2026-11-26]
+    "trigger_delay": 3000,         # camera trigger delay [source: lab PC config4 / utils.py, 2026-11-26]
     "settle_s": 0.05,              # s, wait after an SLM image before a camera frame [source: lab PC config4 / utils.py, 2026-11-26]
     "out_dir": "results/real_box/hardware_test",      # hardware_test.py with the real devices
     "fake_out_dir": "results/hardware_test_fake",     # hardware_test.py with the fake devices (not committed)
