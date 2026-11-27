@@ -10,8 +10,8 @@ comes from ROOM_URL (the room channel, read at most every room_interval_s).
 measure_map, check_map and focus use the real SLM and camera (real_lab/hardware.py), opened on the first optics call
 (then warm_up) and kept open until close(); box-only use never touches them. N = slm_macro_grid^2 SLM inputs (random
 quantized phase patterns as in the simulation, shown with slm_frame: macro pixels, bias grating, gaps; phase <-> gray
-with HARDWARE slm_phase_levels = 256, the SLM's LUT), M = out_grid^2 outputs (camera_outputs: the 48 x 48 intensity
-block-averaged). The maths is the simulation's (ggs.recover, metrics.prediction_correlation, metrics.focus_pattern,
+with HARDWARE slm_phase_levels = 256, the SLM's LUT), M = out_grid^2 outputs (camera_outputs: single pixels of one
+polarization channel). The maths is the simulation's (ggs.recover, metrics.prediction_correlation, metrics.focus_pattern,
 metrics.enhancement); lab times are the real wall-clock durations. A map is saved with its patterns, intensities,
 reference frame and SLM temperature in HARDWARE maps_dir (fake devices: fake_maps_dir). wait() uses the wall clock and writes a thermometer
 row to the lab database every STATE temperature_every_s, as the simulated lab does. truth() is None: nobody knows the
@@ -40,13 +40,17 @@ from real_lab import hardware
 from real_lab.logger import SSL_CONTEXT, read_room
 
 
-def camera_outputs(raw: np.ndarray, out_grid: int = HARDWARE["out_grid"]) -> np.ndarray:
-    """The M = out_grid^2 outputs of one raw camera frame: the intensity (48 x 48, hardware.intensity) block-averaged
-    to out_grid x out_grid, row by row. The one place that decides what a camera "point" is."""
-    image = hardware.intensity(raw)
-    block = image.shape[0] // out_grid
-    image = image[: block * out_grid, : block * out_grid]
-    return image.reshape(out_grid, block, out_grid, block).mean(axis=(1, 3)).ravel()
+def camera_outputs(raw: np.ndarray, s: dict = HARDWARE) -> np.ndarray:
+    """The M = out_grid^2 outputs of one raw camera frame (H x W): single pixels of one polarization channel
+    (polarization_channel's 48 x 48 sub-image, every output_stride-th pixel), row by row. The one place that decides
+    what a camera "point" is. Each output must be one field (one speckle grain, one polarization): GGS fits a rank-1
+    field per output, so a mean over several grains or over the four polarizations cannot be fitted (on the lab PC a
+    6 x 6 block mean gave check_map 0.05, single 0-deg pixels 0.82)."""
+    points = hardware.channel(raw, s["polarization_channel"])[:: s["output_stride"], :: s["output_stride"]]
+    if points.shape != (s["out_grid"], s["out_grid"]):
+        raise ValueError(f"camera outputs {points.shape}, expected out_grid x out_grid = {s['out_grid']} x "
+                         f"{s['out_grid']} (window / 2 / output_stride)")
+    return points.ravel()
 
 
 class RealLab(Lab):
@@ -102,15 +106,14 @@ class RealLab(Lab):
         return self._request(self.box_url)
 
     def room(self) -> float | None:
-        """Room temperature in C: the sensor's probe in the air (room_probe_temp), else its case sensor (room_temp) if the
-        probe is empty (read at most every room_interval_s; None if the read fails or there is no ROOM_URL)."""
+        """Room temperature in C from the room sensor's case sensor (room_temp; the logger also saves its probe, which
+        reads about 0.65 C warmer and made the box fit need an unphysical -3.2 W internal heat), read at most every
+        room_interval_s; None if the read fails or there is no ROOM_URL."""
         if not self.room_url:
             return None
         if self.clock - self._room_t >= self.s["room_interval_s"]:
             try:
-                reading = read_room(self.room_url, self.s["room_channel"], self.s["room_timeout_s"])
-                probe = reading["room_probe_temp"]
-                self._room = float(probe if probe not in (None, "") else reading["room_temp"])
+                self._room = float(read_room(self.room_url, self.s["room_channel"], self.s["room_timeout_s"])["room_temp"])
             except Exception as error:
                 self._log(f"room read failed ({error})")
                 self._room = None
@@ -244,7 +247,7 @@ class RealLab(Lab):
         for k, row in enumerate(E_in):
             values = optics.phase_to_gray(np.angle(row), levels).reshape(grid, grid)
             raw = hardware.measure(self._slm, self._camera, hardware.slm_frame(values, self.hw))
-            I[k], saturated[k] = camera_outputs(raw, self.hw["out_grid"]), np.mean(raw >= 255)
+            I[k], saturated[k] = camera_outputs(raw, self.hw), np.mean(raw >= 255)
         return I, saturated
 
     def _need_map(self) -> None:
@@ -367,7 +370,7 @@ if __name__ == "__main__":
 
     reading = lab.get_temperature()
     print(f"get_temperature: {reading}")
-    assert reading == {"kalman": 20.25, "raw": 20.31, "target": 20.0, "room": 21.0}   # the probe in the air, not the case sensor (21.4)
+    assert reading == {"kalman": 20.25, "raw": 20.31, "target": 20.0, "room": 21.4}
     status = lab.get_status()
     assert status["duty"] == 412 and status["control"] is None and status["map_age_s"] is None
     assert lab.truth() is None, "nobody knows the true temperature of the real box"
@@ -375,7 +378,7 @@ if __name__ == "__main__":
     # Through SafeLab as the operator: a target above room - margin is sent, with a warning note.
     operator = SafeLab(lab, "operator")
     from config import LAB_LIMITS
-    near_room = round(room["channels"][0]["latest"]["external_temperature"] - LAB_LIMITS["room_margin_C"] + 0.1, 6)
+    near_room = round(room["channels"][0]["latest"]["temperature"] - LAB_LIMITS["room_margin_C"] + 0.1, 6)
     operator.set_target(near_room)
     operator.set_control(True)
     posts = [(path, body) for kind, path, body in requests if kind == "POST"]

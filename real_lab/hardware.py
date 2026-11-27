@@ -44,12 +44,22 @@ def use_fake(fake: bool | None) -> bool:
     return sys.platform != "win32" if fake is None else fake
 
 
+# Polarization mosaic of the camera: polarizer angle (deg) -> (row, column) offset of its sub-image raw[r::2, c::2]
+# [source: lab PC utils.py, 2026-11-26]: raw[::2, ::2] 90 deg, raw[::2, 1::2] 45 deg, raw[1::2, ::2] 135 deg,
+# raw[1::2, 1::2] 0 deg.
+MOSAIC = {"90": (0, 0), "45": (0, 1), "135": (1, 0), "0": (1, 1)}
+
+
+def channel(raw: np.ndarray, angle: str) -> np.ndarray:
+    """The sub-image (H/2 x W/2, float32) of one polarizer angle (a MOSAIC key) of a mosaic frame (H x W)."""
+    r, c = MOSAIC[angle]
+    return np.asarray(raw, dtype=np.float32)[r::2, c::2]
+
+
 def intensity(raw: np.ndarray) -> np.ndarray:
-    """Intensity (H/2 x W/2) of a polarization mosaic frame (H x W): the mean of its four polarizer sub-images.
-    Mosaic layout [source: lab PC utils.py, 2026-11-26]: raw[::2, ::2] 90 deg, raw[::2, 1::2] 45 deg,
-    raw[1::2, ::2] 135 deg, raw[1::2, 1::2] 0 deg."""
-    raw = np.asarray(raw, dtype=np.float32)
-    return (raw[::2, ::2] + raw[::2, 1::2] + raw[1::2, ::2] + raw[1::2, 1::2]) / 4.0
+    """Intensity (H/2 x W/2) of a polarization mosaic frame (H x W): the mean of its four polarizer sub-images
+    (MOSAIC)."""
+    return sum(channel(raw, angle) for angle in MOSAIC) / 4.0
 
 
 class RealSLM:

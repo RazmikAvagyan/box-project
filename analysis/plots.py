@@ -739,6 +739,29 @@ def plot_kalman_summary(
     return _save(fig, path)
 
 
+def plot_drift_runs(runs: dict[str, dict], path: str | Path, title: str) -> Path:
+    """Stability runs of the real setup, one colour per run (label -> dict of (n,) arrays over "t_s"): the correlation of
+    each reference frame to the run's first one, and the temperatures (SLM solid, box dashed, room dotted; box and room
+    only where measured). Time in min."""
+    fig, (ax_c, ax_t) = plt.subplots(2, 1, figsize=(FIGSIZE[0], 1.5 * FIGSIZE[1]), sharex=True, layout="constrained")
+    fig.suptitle(title)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for (label, run), color in zip(runs.items(), colors):
+        t = run["t_s"] / 60.0
+        ax_c.plot(t, run["corr"], color=color, linewidth=1.5, marker=".", label=label)
+        ax_t.plot(t, run["slm_C"], color=color, linewidth=1.5, label=f"{label}: SLM")
+        for key, style, name in [("box_C", "--", "box"), ("room_C", ":", "room")]:
+            if run.get(key) is not None and np.isfinite(run[key]).any():
+                ax_t.plot(t, run[key], color=color, linewidth=1.5, linestyle=style, label=f"{label}: {name}")
+    ax_c.set_ylabel("correlation to the first frame")
+    ax_t.set_ylabel("temperature (°C)")
+    ax_t.set_xlabel("time since the start of the run (min)")
+    for ax in (ax_c, ax_t):
+        ax.grid(alpha=GRID_ALPHA)
+        ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9)
+    return _save(fig, path)
+
+
 def plot_hardware_test(rows: dict[str, tuple[np.ndarray, np.ndarray]], path: str | Path, title: str,
                        names: tuple[str, str] = ("reference", "pattern")) -> Path:
     """Hardware test frames, one row per kind (e.g. "raw" (96, 96) and "intensity" (48, 48)): the two frames (names)
@@ -849,6 +872,10 @@ if __name__ == "__main__":
                                  "PID b": {"Kalman": (hold["t_s"], hold["T_true"], hold["target"], hold["duty"] / 10.23)}},
                                 {"PID a": (10.0, 40.0), "PID b": (5.0, 30.0)}, out / "kalman_summary.png",
                                 "Kalman filter: same temperature, much calmer cooler"),
+            plot_drift_runs({"a": {"t_s": np.arange(5.0) * 10, "corr": np.linspace(1, 0.9, 5), "slm_C": np.full(5, 27.0)},
+                             "b": {"t_s": np.arange(5.0) * 10, "corr": np.linspace(1, 0.95, 5), "slm_C": np.full(5, 27.2),
+                                   "box_C": np.full(5, 22.0), "room_C": np.full(5, 20.6)}},
+                            out / "drift_runs.png", "Drift runs"),
             plot_hardware_test({"raw": (np.full((96, 96), 20.0), np.random.default_rng(0).uniform(0, 255, (96, 96))),
                                 "intensity": (np.full((48, 48), 20.0), np.random.default_rng(1).uniform(0, 255, (48, 48)))},
                                out / "hardware_test.png", "Hardware test"),

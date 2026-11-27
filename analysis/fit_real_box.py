@@ -40,14 +40,13 @@ UNITS = {"G": "W/K", "P_internal": "W", "P_max": "W", "tau_cooler": "s", "C_w": 
 
 def load(path: str | Path, start_clock: str) -> dict[str, np.ndarray]:
     """CSV rows from start_clock on as arrays (n,): t_s (s since start_clock), T (raw), T_filtered, duty, target,
-    T_room (the room sensor's probe in the air, room_probe_temp, or its case sensor room_temp where the probe is empty;
-    interpolated linearly between the sample times)."""
+    T_room (room_temp, the room sensor's case sensor, interpolated linearly between its sample times; its probe
+    room_probe_temp reads about 0.65 C warmer and would need an unphysical -3.2 W internal heat)."""
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     t0 = datetime.fromisoformat(start_clock).timestamp()
     clock = lambda text: datetime.fromisoformat(text).timestamp() - t0
-    room_value = lambda r: r["room_probe_temp"] if r["room_probe_temp"] else r["room_temp"]
-    room = sorted({(clock(r["room_sample_time"]), float(room_value(r))) for r in rows if room_value(r)})
+    room = sorted({(clock(r["room_sample_time"]), float(r["room_temp"])) for r in rows if r["room_temp"]})
     rows = [r for r in rows if r["clock_time"] >= start_clock]
     col = lambda k: np.array([float(r[k]) for r in rows])
     t = col("time_s") - col("time_s")[0]

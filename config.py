@@ -284,9 +284,13 @@ HARDWARE = {
     "slm_bias_grating": 128,       # added to every second column (uint8, wraps) [source: lab PC model/utils.py + config4 model section, 2026-11-27]
     "slm_phase_levels": 256,       # gray values per 2 pi on the real SLM: its LUT puts 128 at pi (the simulation uses
                                    # 255) [source: lab PC model/utils.py, 2026-11-27]
-    # RealLab maps (real_lab/lab.py): N = slm_macro_grid^2 inputs, M = out_grid^2 outputs (camera intensity 48 x 48
-    # block-averaged to out_grid x out_grid; 8 -> M 64 as in the simulation)
-    "out_grid": 8,                 # [estimate]
+    # RealLab maps (real_lab/lab.py): N = slm_macro_grid^2 inputs, M = out_grid^2 outputs = single camera pixels of one
+    # polarization channel (the 48 x 48 sub-image, every output_stride-th pixel). An output must be ONE field: a block
+    # mean (several speckle grains) or the four-polarization average cannot be fitted by GGS. On the lab PC: single 0-deg
+    # pixels check_map 0.82 (grid 4), 4-polarization average 0.37, 6 x 6 block mean 0.05 [source: lab PC test 2026-11-27]
+    "polarization_channel": "0",   # deg, a key of hardware.MOSAIC: "0" = raw[1::2, 1::2] [source: lab PC test 2026-11-27]
+    "output_stride": 6,            # every 6th pixel of the 48 x 48 sub-image -> 8 x 8 outputs [source: lab PC test 2026-11-27]
+    "out_grid": 8,                 # outputs per side: 48 / output_stride; M = out_grid^2 = 64 as in the simulation
     "min_light": 10.0,             # counts, a reference frame darker than this means no light on the camera [estimate:
                                    # blank SLM ~2, grating ~62 on the lab PC, 2026-11-27]
     "pattern_seed": 0,             # random SLM patterns of RealLab (one generator for the whole lab)
@@ -320,6 +324,16 @@ HARDWARE = {
                                    # settling [source: lab PC test 2026-11-27]
     "out_dir": "results/real_box/hardware_test",      # hardware_test.py with the real devices
     "fake_out_dir": "results/hardware_test_fake",     # hardware_test.py with the fake devices (not committed)
+}
+
+DRIFT_RUN = {
+    # real_lab/drift.py: the same reference SLM image (bias grating) every interval_s for duration_s; correlation of each
+    # frame to the first, with SLM, box and room temperatures [source: lab PC probe script, 2026-11-27]
+    "interval_s": 10,              # s, one frame and one temperature reading this often
+    "duration_s": 600,             # s, length of a run
+    "read_timeout_s": 3,           # s, box and room GET requests (shorter than interval_s)
+    "out_dir": "results/real_box/stability",
+    "fake_out_dir": "results/hardware_test_fake/stability",   # with the fake devices (not committed)
 }
 
 LAB_LIMITS = {
