@@ -739,16 +739,17 @@ def plot_kalman_summary(
     return _save(fig, path)
 
 
-def plot_hardware_test(rows: dict[str, tuple[np.ndarray, np.ndarray]], path: str | Path, title: str) -> Path:
-    """Hardware test frames, one row per kind (e.g. "raw" (96, 96) and "intensity" (48, 48)): blank SLM and test
-    pattern on one 0..255 scale, and their difference (pattern - blank) on a symmetric scale; one colorbar per
-    quantity and row."""
+def plot_hardware_test(rows: dict[str, tuple[np.ndarray, np.ndarray]], path: str | Path, title: str,
+                       names: tuple[str, str] = ("reference", "pattern")) -> Path:
+    """Hardware test frames, one row per kind (e.g. "raw" (96, 96) and "intensity" (48, 48)): the two frames (names)
+    on one 0..255 scale, and their difference (second - first) on a symmetric scale; one colorbar per quantity and
+    row."""
     fig, axes = plt.subplots(len(rows), 3, figsize=(FIGSIZE[0], 0.8 * FIGSIZE[1] * len(rows)), layout="constrained",
                              squeeze=False)
     fig.suptitle(title)
     for row, (kind, (blank, pattern)) in zip(axes, rows.items()):
         diff = pattern.astype(float) - blank.astype(float)
-        for ax, image, name in [(row[0], blank, "blank SLM"), (row[1], pattern, "test pattern")]:
+        for ax, image, name in [(row[0], blank, names[0]), (row[1], pattern, names[1])]:
             im = _show_image(ax, image, 0, 255)
             ax.set_title(f"{kind}, {name} {image.shape[1]}×{image.shape[0]}\nmean {image.mean():.1f}, max {image.max():.0f}",
                          fontsize=10)
@@ -757,7 +758,7 @@ def plot_hardware_test(rows: dict[str, tuple[np.ndarray, np.ndarray]], path: str
         im = row[2].imshow(diff, cmap="RdBu_r", vmin=-span, vmax=span)
         row[2].set_xticks([])
         row[2].set_yticks([])
-        row[2].set_title(f"{kind}, pattern - blank\nmean |diff| {np.abs(diff).mean():.1f}", fontsize=10)
+        row[2].set_title(f"{kind}, {names[1]} - {names[0]}\nmean |diff| {np.abs(diff).mean():.1f}", fontsize=10)
         fig.colorbar(im, ax=row[2], shrink=0.8, label="difference (counts)")
     return _save(fig, path)
 

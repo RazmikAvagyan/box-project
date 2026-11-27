@@ -15,7 +15,9 @@ pattern changes the image as on the real setup. Every SDK return value is checke
 managers and always close in __exit__ (SLM: blank image, then Delete_SDK; camera: acquire off).
 External trigger (HARDWARE trigger, on by default as in the lab's working setup): the SLM sends an output pulse on each
 flip and the camera starts a frame on its external input; with trigger False the camera runs free and the SLM sends no
-pulse. All measurement code takes frames only through measure(slm, camera, phase): the SLM image, then at once the
+pulse. SLM images are built with slm_frame(values) (the lab's prepare_slm_data: macro pixels, bias grating, gap mask);
+the camera sits in the bias grating's first order, so without the grating it sees no light. reference_frame() is the
+grating alone. All measurement code takes frames only through measure(slm, camera, phase): the SLM image, then at once the
 camera frame (with the trigger the frame is taken at the SLM write and the camera trigger delay does the settling; a
 sleep in between loses it; without the trigger measure waits settle_s). warm_up(slm, camera) runs measure() with a
 blank image warmup_frames times (as in the lab code) and is called once both devices are open.
@@ -288,8 +290,10 @@ class RealCamera:
 
 
 class FakeCamera:
-    """A stand-in camera: speckle from a fixed random transmission of the fake SLM's phase (16 x 16 macro pixels),
-    with camera noise, as raw frames of the configured size (float32 counts 0..255)."""
+    """A stand-in camera in the first diffraction order of the SLM's column grating: the field of each of 16 x 16 blocks
+    is the mean of exp(i phase) * (-1)^column (zero for a flat image, full for the bias grating), sent through a fixed
+    random transmission, plus camera noise; raw frames of the configured size (float32 counts 0..255). So a blank SLM
+    gives a dark frame and the grating a bright speckle, as on the real setup."""
 
     def __init__(self, slm: FakeSLM | None = None, s: dict = SETTINGS, seed: int = 0):
         self.s, self.slm, self.shape, self.is_open = s, slm, (s["image_size_y"], s["image_size_x"]), False
@@ -314,9 +318,11 @@ class FakeCamera:
         phase = np.zeros(self.s["slm_size"], dtype=np.uint8) if self.slm is None or self.slm.image is None \
             else self.slm.image
         h, w = phase.shape
-        macro = phase[: h - h % 16, : w - w % 16].reshape(16, h // 16, 16, w // 16).mean(axis=(1, 3))   # (16 x 16)
-        E_in = np.exp(2j * np.pi * macro.reshape(1, -1) / 256)        # (1 x N), row convention E_out = E_in @ T
-        frame = 200 * np.abs(E_in @ self.T).reshape(self.shape) ** 2 / 3.0 + self.rng.normal(0, 2, self.shape) + 10
+        # First order of the period-2 column grating: each pixel's field with the sign of its column.
+        first_order = np.exp(2j * np.pi * phase / 256.0) * np.where(np.arange(w) % 2 == 0, 1.0, -1.0)
+        blocks = first_order[: h - h % 16, : w - w % 16].reshape(16, h // 16, 16, w // 16).mean(axis=(1, 3))
+        E_in = blocks.reshape(1, -1)                                  # (1 x N), row convention E_out = E_in @ T
+        frame = 200 * np.abs(E_in @ self.T).reshape(self.shape) ** 2 / 3.0 + self.rng.normal(0, 1, self.shape) + 2
         return np.clip(np.round(frame), 0, 255).astype(np.float32)
 
     def grab_intensity(self) -> np.ndarray:
@@ -325,6 +331,32 @@ class FakeCamera:
 
     def close(self) -> None:
         self.is_open = False
+
+
+def slm_frame(values: np.ndarray, s: dict = SETTINGS) -> np.ndarray:
+    """The SLM image (H x W uint8) for values (grid x grid, 0..255) on the macro pixels, built like the lab's
+    prepare_slm_data for a square SLM: each value repeated over its macro pixel, plus the bias grating on every second
+    column ([:, ::2], uint8 wrap), times a mask that is 0 on the first gap_px rows and columns of every macro pixel."""
+    grid, (height, width) = s["slm_macro_grid"], s["slm_size"]
+    values = np.asarray(values)
+    if values.shape != (grid, grid):
+        raise ValueError(f"SLM values shape {values.shape}, expected ({grid}, {grid})")
+    if values.min() < 0 or values.max() > 255:
+        raise ValueError("SLM values must be within 0 .. 255")
+    macro = height // grid
+    data = np.repeat(np.repeat(values.astype(np.uint8), macro, axis=0), macro, axis=1)         # (H x W)
+    grating = np.zeros((height, width), dtype=np.uint8)
+    grating[:, ::2] = s["slm_bias_grating"]
+    data = data + grating                                                                       # uint8: wraps at 256
+    keep_rows = (np.arange(height) % macro) >= s["slm_gap_px"]
+    keep_cols = (np.arange(width) % macro) >= s["slm_gap_px"]
+    mask = np.outer(keep_rows, keep_cols).astype(np.uint8)
+    return data * mask
+
+
+def reference_frame(s: dict = SETTINGS) -> np.ndarray:
+    """The bias grating alone (all values 0): the reference SLM image (H x W uint8)."""
+    return slm_frame(np.zeros((s["slm_macro_grid"], s["slm_macro_grid"]), dtype=np.uint8), s)
 
 
 def measure(slm, camera, phase: np.ndarray) -> np.ndarray:
@@ -338,10 +370,10 @@ def measure(slm, camera, phase: np.ndarray) -> np.ndarray:
 
 
 def warm_up(slm, camera, n: int = SETTINGS["warmup_frames"]) -> None:
-    """n warm-up frames through measure() with a blank SLM image, discarded (as in the lab code). Call it once both
-    devices are open, before the first measured frame."""
+    """n warm-up frames through measure() with the reference image (the bias grating), discarded (as in the lab code).
+    Call it once both devices are open, before the first measured frame."""
     for _ in range(n):
-        measure(slm, camera, np.zeros(slm.shape, dtype=np.uint8))
+        measure(slm, camera, reference_frame(camera.s))
 
 
 def SLM(fake: bool | None = None, s: dict = SETTINGS):
@@ -358,17 +390,40 @@ if __name__ == "__main__":
     import types
 
     # 1. The fake devices (any machine): shapes, the intensity of the mosaic, checks, closing.
+    # slm_frame: shape, the bias grating on even columns, the gap mask, the uint8 wrap.
+    grid, gap, bias = SETTINGS["slm_macro_grid"], SETTINGS["slm_gap_px"], SETTINGS["slm_bias_grating"]
+    macro = SETTINGS["slm_size"][0] // grid
+    values = np.full((grid, grid), 200, dtype=np.uint8)
+    values[0, 1] = 50
+    frame = slm_frame(values)
+    inside = (gap, gap)                                             # first pixel after the gap (row, even column)
+    assert frame.shape == tuple(SETTINGS["slm_size"]) and frame.dtype == np.uint8
+    assert frame[inside] == (200 + bias) % 256 and frame[gap, gap + 1] == 200, "grating on even columns, uint8 wrap"
+    assert frame[gap, macro + gap] == (50 + bias) % 256 and frame[gap, macro + gap + 1] == 50, "the macro pixel's value"
+    assert not frame[:gap].any() and not frame[:, macro:macro + gap].any(), "gap rows and columns are 0"
+    ref = reference_frame()
+    assert (ref[gap, gap::2][:macro // 2 - gap // 2] == bias).all() and not ref[gap, gap + 1::2].any()
+    for bad in (np.zeros((3, 3)), np.full((grid, grid), 300)):
+        try:
+            slm_frame(bad)
+            raise AssertionError("bad SLM values must raise")
+        except ValueError:
+            pass
+    print(f"slm_frame: {frame.shape}, value + {bias} on even columns (200 -> {frame[inside]}), gap {gap} px masked")
+
     with SLM(fake=True) as slm, Camera(fake=True, slm=slm) as cam:
-        dark = cam.grab()
-        ramp = np.tile((np.arange(slm.shape[1]) * 256 // slm.shape[1]).astype(np.uint8), (slm.shape[0], 1))
-        slm.show(ramp)
+        dark = cam.grab()                                         # blank SLM: no grating, no light
+        slm.show(reference_frame())
         lit, lit_i = cam.grab(), cam.grab_intensity()
+        slm.show(slm_frame(np.random.default_rng(0).integers(0, 256, (grid, grid))))
+        other = cam.grab()
         print(f"fake SLM {slm.shape} at {slm.temperature():g} C, fake camera raw {dark.shape} {dark.dtype}, intensity "
-              f"{lit_i.shape}: blank mean {dark.mean():.1f}, ramp mean {lit.mean():.1f}, mean |difference| "
-              f"{np.abs(lit - dark).mean():.1f}")
+              f"{lit_i.shape}: blank mean {dark.mean():.1f}, grating mean {lit.mean():.1f}, random values mean "
+              f"{other.mean():.1f}")
         assert dark.shape == (SETTINGS["image_size_y"], SETTINGS["image_size_x"]) and dark.dtype == np.float32
         assert lit_i.shape == (dark.shape[0] // 2, dark.shape[1] // 2) and slm.temperature() == 25.0
-        assert np.abs(lit - dark).mean() > 1, "a test pattern must change the fake speckle"
+        assert dark.mean() < 5 and lit.mean() > 30, "blank dark, grating bright (the camera is in the first order)"
+        assert np.abs(other - lit).mean() > 5, "other values change the speckle"
         try:
             slm.show(np.zeros((10, 10), dtype=np.uint8))
             raise AssertionError("a wrong image shape must raise")

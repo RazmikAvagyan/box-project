@@ -275,6 +275,13 @@ HARDWARE = {
     "slm_timeout_ms": 5000,        # ms, Write_image and ImageWriteComplete [source: lab PC config4 / utils.py, 2026-11-26]
     "slm_size": (1024, 1024),      # (height, width) of the SLM, also the fake SLM's size [source: lab PC config4 / utils.py, 2026-11-26]
     "slm_flip_immediate": False,   # SetFlipImmediate [source: lab PC config4 / utils.py, 2026-11-26]
+    # SLM pattern encoding (real_lab/hardware.py slm_frame, as the lab's prepare_slm_data): values on a grid x grid of
+    # macro pixels, plus a bias grating (+ this on every second column), times a mask that is 0 on the first gap_px rows
+    # and columns of every macro pixel. The camera sits in the grating's first order: without the bias grating no light
+    # reaches the camera window.
+    "slm_macro_grid": 4,           # macro pixels per side (n_input 16 = 4 x 4; 1024 / 4 = 256 px each) [source: lab PC model/utils.py + config4 model section, 2026-11-27]
+    "slm_gap_px": 14,              # px, inter_pixel_distance: masked rows/columns at the start of each macro pixel [source: lab PC model/utils.py + config4 model section, 2026-11-27]
+    "slm_bias_grating": 128,       # added to every second column (uint8, wraps) [source: lab PC model/utils.py + config4 model section, 2026-11-27]
     # Camera: Alkeria Celera C5S-MP over USB3, Python module alkusb3 (on the lab PC) [source: lab PC config4 / utils.py, 2026-11-26]
     "camera_index": 0,             # [source: lab PC config4 / utils.py, 2026-11-26]
     "image_start_x": 1136,         # px, window corner [source: lab PC config4 / utils.py, 2026-11-26]

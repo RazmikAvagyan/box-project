@@ -1,13 +1,13 @@
 """
 hardware_test.py - a first check of the real SLM and camera together (real_lab/hardware.py).
 
-Opens both, prints the SLM temperature, takes the warm-up frames (warm_up), then a frame with a blank SLM image and one
-with a test pattern (a vertical phase ramp: the phase rises from left to right), each through measure() (the SLM image,
-then the frame). Each frame is kept raw (the 96 x 96 polarization mosaic) and as intensity (48 x 48, the mean of the
-four polarizer sub-images). Saves one PNG (raw and intensity: both frames and their difference) and the arrays (.npz)
-in results/real_box/hardware_test/<date_time>/ (with the fake devices in results/hardware_test_fake/<date_time>/, which
-is not committed), prints min/max/mean of each image, and always closes both devices (SLM blank, then off; camera
-acquisition off).
+Opens both, prints the SLM temperature, takes the warm-up frames (warm_up), then a frame with the reference SLM image
+(the bias grating alone) and one with a pattern (random 4 x 4 macro-pixel values, seed 0, built by slm_frame), each
+through measure() (the SLM image, then the frame); prints mean, max and the share of saturated pixels (255). Each frame
+is kept raw (the 96 x 96 polarization mosaic) and as intensity (48 x 48, the mean of the four polarizer sub-images).
+Saves one PNG (raw and intensity: both frames and their difference) and the arrays (.npz) in
+results/real_box/hardware_test/<date_time>/ (with the fake devices in results/hardware_test_fake/<date_time>/, which is
+not committed), and always closes both devices (SLM blank, then off; camera acquisition off).
 
 python -m real_lab.hardware_test          on the lab PC (the fake devices on a machine that is not Windows)
 python -m real_lab.hardware_test --fake   with the fake devices on any machine
@@ -25,18 +25,13 @@ import numpy as np
 
 from analysis import plots
 from config import HARDWARE as SETTINGS
-from real_lab.hardware import Camera, FakeSLM, SLM, intensity, measure, warm_up
+from real_lab.hardware import Camera, FakeSLM, SLM, intensity, measure, reference_frame, slm_frame, warm_up
 
 
-def phase_ramp(shape: tuple[int, int]) -> np.ndarray:
-    """A vertical phase ramp (H x W uint8): 0 at the left edge rising to 255 at the right."""
-    height, width = shape
-    return np.tile((np.arange(width) * 256 // width).astype(np.uint8), (height, 1))
-
-
-def describe(name: str, image: np.ndarray) -> str:
-    """'name: min .., max .., mean ..' of one image."""
-    return f"{name:12} min {image.min():7.1f}  max {image.max():7.1f}  mean {image.mean():7.2f}"
+def describe(name: str, image: np.ndarray, saturation: bool = True) -> str:
+    """'name: mean .., max .., (% of pixels at 255)' of one image."""
+    text = f"{name:16} mean {image.mean():7.2f}  max {image.max():7.1f}"
+    return text + (f"  at 255: {100 * np.mean(image >= 255):5.1f} %" if saturation else "")
 
 
 def main() -> Path:
@@ -59,22 +54,24 @@ def main() -> Path:
         out = Path(SETTINGS["fake_out_dir" if kind == "fake" else "out_dir"]) / stamp
         print(f"devices: {kind} SLM {slm.shape[1]} x {slm.shape[0]}, {kind} camera {camera.shape[1]} x {camera.shape[0]}")
         print(f"SLM temperature: {slm.temperature():.2f} C")
-        warm_up(slm, camera)                     # measure() with a blank image, warmup_frames times
-        blank = measure(slm, camera, np.zeros(slm.shape, dtype=np.uint8))
-        pattern_phase = phase_ramp(slm.shape)
-        pattern = measure(slm, camera, pattern_phase)
+        warm_up(slm, camera)                     # measure() with the reference image, warmup_frames times
+        grid = s["slm_macro_grid"]
+        values = np.random.default_rng(0).integers(0, 256, (grid, grid)).astype(np.uint8)
+        reference = measure(slm, camera, reference_frame(s))
+        pattern = measure(slm, camera, slm_frame(values, s))
 
-    blank_i, pattern_i = intensity(blank), intensity(pattern)
-    for name, image in [("blank raw", blank), ("ramp raw", pattern), ("diff raw", pattern - blank),
-                        ("blank int.", blank_i), ("ramp int.", pattern_i), ("diff int.", pattern_i - blank_i)]:
-        print(describe(name, image))
+    reference_i, pattern_i = intensity(reference), intensity(pattern)
+    for name, image, saturation in [("reference raw", reference, True), ("pattern raw", pattern, True),
+                                    ("difference raw", pattern - reference, False),
+                                    ("reference int.", reference_i, False), ("pattern int.", pattern_i, False)]:
+        print(describe(name, image, saturation))
     out.mkdir(parents=True, exist_ok=True)
-    np.savez(out / "frames.npz", blank_raw=blank, pattern_raw=pattern, blank_intensity=blank_i,
-             pattern_intensity=pattern_i, pattern_phase=pattern_phase)
-    png = plots.plot_hardware_test({"raw": (blank, pattern), "intensity": (blank_i, pattern_i)},
-                                   out / "01_camera_blank_vs_phase_ramp.png",
-                                   f"Hardware test ({kind} devices): camera with a blank SLM and with a phase ramp\n"
-                                   f"{out.name}")
+    np.savez(out / "frames.npz", reference_raw=reference, pattern_raw=pattern, reference_intensity=reference_i,
+             pattern_intensity=pattern_i, pattern_values=values)
+    png = plots.plot_hardware_test({"raw": (reference, pattern), "intensity": (reference_i, pattern_i)},
+                                   out / "01_camera_reference_vs_pattern.png",
+                                   f"Hardware test ({kind} devices): bias grating alone vs. random {grid}x{grid} "
+                                   f"values (seed 0)\n{out.name}")
     print(f"saved {png}")
     print(f"saved {out / 'frames.npz'}")
     return out
