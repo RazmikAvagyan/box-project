@@ -1,12 +1,13 @@
 """
 hardware_test.py - a first check of the real SLM and camera together (real_lab/hardware.py).
 
-Opens both, prints the SLM temperature, takes the warm-up frames (warm_up: an SLM image, then a frame), shows a blank SLM image and grabs a frame, then shows a test pattern (a vertical
-phase ramp: the phase rises from left to right), waits HARDWARE settle_s and grabs again. Each frame is kept raw (the
-96 x 96 polarization mosaic) and as intensity (48 x 48, the mean of the four polarizer sub-images). Saves one PNG (raw
-and intensity: both frames and their difference) and the arrays (.npz) in results/real_box/hardware_test/<date_time>/ (with the fake devices in
-results/hardware_test_fake/<date_time>/, which is not committed), prints min/max/mean of each image, and always closes
-both devices (SLM blank, then off; camera acquisition off).
+Opens both, prints the SLM temperature, takes the warm-up frames (warm_up), then a frame with a blank SLM image and one
+with a test pattern (a vertical phase ramp: the phase rises from left to right), each through measure() (the SLM image,
+then the frame). Each frame is kept raw (the 96 x 96 polarization mosaic) and as intensity (48 x 48, the mean of the
+four polarizer sub-images). Saves one PNG (raw and intensity: both frames and their difference) and the arrays (.npz)
+in results/real_box/hardware_test/<date_time>/ (with the fake devices in results/hardware_test_fake/<date_time>/, which
+is not committed), prints min/max/mean of each image, and always closes both devices (SLM blank, then off; camera
+acquisition off).
 
 python -m real_lab.hardware_test          on the lab PC (the fake devices on a machine that is not Windows)
 python -m real_lab.hardware_test --fake   with the fake devices on any machine
@@ -16,7 +17,6 @@ python -m real_lab.hardware_test --no-trigger   free-running camera, no SLM puls
 from __future__ import annotations
 
 import argparse
-import time
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +25,7 @@ import numpy as np
 
 from analysis import plots
 from config import HARDWARE as SETTINGS
-from real_lab.hardware import Camera, FakeSLM, SLM, intensity, warm_up
+from real_lab.hardware import Camera, FakeSLM, SLM, intensity, measure, warm_up
 
 
 def phase_ramp(shape: tuple[int, int]) -> np.ndarray:
@@ -59,15 +59,10 @@ def main() -> Path:
         out = Path(SETTINGS["fake_out_dir" if kind == "fake" else "out_dir"]) / stamp
         print(f"devices: {kind} SLM {slm.shape[1]} x {slm.shape[0]}, {kind} camera {camera.shape[1]} x {camera.shape[0]}")
         print(f"SLM temperature: {slm.temperature():.2f} C")
-        warm_up(slm, camera)                     # an SLM image before each warm-up frame (needed with the trigger)
-
-        slm.blank()
-        time.sleep(SETTINGS["settle_s"])
-        blank = camera.grab()
+        warm_up(slm, camera)                     # measure() with a blank image, warmup_frames times
+        blank = measure(slm, camera, np.zeros(slm.shape, dtype=np.uint8))
         pattern_phase = phase_ramp(slm.shape)
-        slm.show(pattern_phase)
-        time.sleep(SETTINGS["settle_s"])
-        pattern = camera.grab()
+        pattern = measure(slm, camera, pattern_phase)
 
     blank_i, pattern_i = intensity(blank), intensity(pattern)
     for name, image in [("blank raw", blank), ("ramp raw", pattern), ("diff raw", pattern - blank),

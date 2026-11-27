@@ -15,15 +15,17 @@ pattern changes the image as on the real setup. Every SDK return value is checke
 managers and always close in __exit__ (SLM: blank image, then Delete_SDK; camera: acquire off).
 External trigger (HARDWARE trigger, on by default as in the lab's working setup): the SLM sends an output pulse on each
 flip and the camera starts a frame on its external input; with trigger False the camera runs free and the SLM sends no
-pulse. With the trigger the camera has a frame only after an SLM image: measurement code first calls
-warm_up(slm, camera) (an SLM image, then a frame, warmup_frames times, as in the lab code) and grabs each frame after
-showing its SLM image.
+pulse. All measurement code takes frames only through measure(slm, camera, phase): the SLM image, then at once the
+camera frame (with the trigger the frame is taken at the SLM write and the camera trigger delay does the settling; a
+sleep in between loses it; without the trigger measure waits settle_s). warm_up(slm, camera) runs measure() with a
+blank image warmup_frames times (as in the lab code) and is called once both devices are open.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -252,7 +254,10 @@ class RealCamera:
 
     def grab(self) -> np.ndarray:
         """One raw mosaic frame (image_size_y x image_size_x, float32 counts). With the trigger the camera has a frame
-        only after an SLM image (its output pulse)."""
+        only after an SLM image (its output pulse); take frames through measure()."""
+        # Frames are read as (image_size_y, image_size_x) rows x columns; the lab code reads them with PIL using
+        # (size_y, size_x) as (width, height). For a non-square window check the axes on the real camera; the 96 x 96
+        # window is square, so it does not matter now.
         no_frame = ("no camera frame: with the external trigger the camera only takes a frame after an SLM image (output "
                     "pulse); check the trigger cable or run with --no-trigger" if self.s["trigger"] else
                     "no camera frame (get_raw_data gave nothing)")
@@ -322,12 +327,21 @@ class FakeCamera:
         self.is_open = False
 
 
+def measure(slm, camera, phase: np.ndarray) -> np.ndarray:
+    """The camera frame (raw, float32, the camera's shape) for one SLM phase image (H x W uint8): the image, then the
+    frame at once with the trigger (the frame is taken at the SLM write; a sleep in between loses it), or after
+    settle_s without it. The only way later measurement code takes frames."""
+    slm.show(phase)
+    if not camera.s["trigger"]:
+        time.sleep(camera.s["settle_s"])
+    return camera.grab()
+
+
 def warm_up(slm, camera, n: int = SETTINGS["warmup_frames"]) -> None:
-    """n warm-up frames, each after a blank SLM image (as in the lab code; with the external trigger the camera takes a
-    frame only after an SLM image). Call it once both devices are open, before the first measured frame."""
+    """n warm-up frames through measure() with a blank SLM image, discarded (as in the lab code). Call it once both
+    devices are open, before the first measured frame."""
     for _ in range(n):
-        slm.blank()
-        camera.grab()
+        measure(slm, camera, np.zeros(slm.shape, dtype=np.uint8))
 
 
 def SLM(fake: bool | None = None, s: dict = SETTINGS):
@@ -367,6 +381,7 @@ if __name__ == "__main__":
     # 2. RealCamera.open with a stand-in alkusb3 module: every setting and the trigger are passed through, the
     # warm-up frames are dropped, and the camera stops acquiring when closed.
     SENSOR = {"x": 1232, "y": 1028}     # x from the real camera's error message; y assumed (full height)
+    FRAME_WINDOW_S = 0.01               # s, a triggered frame must be read this soon after the SLM write (real: ~10 ms)
 
     class StandInCamera:
         """Like the real camera: a full-sensor window at first, start + size may never exceed the sensor; records the
@@ -375,7 +390,7 @@ if __name__ == "__main__":
             for name, value in [("order", []), ("frames", 0), ("frame_start_trigger", types.SimpleNamespace()),
                                 ("pio_ports", [types.SimpleNamespace(debounce_time=None) for _ in range(4)]),
                                 ("image_start_x", 0), ("image_start_y", 0), ("image_size_x", SENSOR["x"]),
-                                ("image_size_y", SENSOR["y"]), ("slm_written", False)]:
+                                ("image_size_y", SENSOR["y"]), ("slm_written_t", None)]:
                 object.__setattr__(self, name, value)
 
         def __setattr__(self, name, value):
@@ -392,12 +407,13 @@ if __name__ == "__main__":
             self.order.append(("init", None))
 
         def get_raw_data(self):
-            """A frame; with the trigger enabled only after an SLM write since the last frame, else it fails like
-            alkusb3 on the lab PC."""
+            """A frame; with the trigger enabled it is taken at the SLM write and read only right after it (within
+            FRAME_WINDOW_S, no other read since), else no frame, as alkusb3 on the lab PC."""
             if getattr(self.frame_start_trigger, "enabled", False):
-                if not self.slm_written:
+                if self.slm_written_t is None or time.monotonic() - self.slm_written_t > FRAME_WINDOW_S:
+                    object.__setattr__(self, "slm_written_t", None)
                     return None.to_bytes()                           # AttributeError, as on the lab PC
-                object.__setattr__(self, "slm_written", False)
+                object.__setattr__(self, "slm_written_t", None)
             object.__setattr__(self, "frames", self.frames + 1)        # a frame, not a setting
             return bytes(SETTINGS["image_size_x"] * SETTINGS["image_size_y"])
 
@@ -424,16 +440,25 @@ if __name__ == "__main__":
                 print(f"stand-in camera, trigger on, grab without an SLM image: {error}")
                 assert "only takes a frame after an SLM image" in str(error)
 
-            class TriggeringSLM(FakeSLM):
-                """A fake SLM whose every image sends the stand-in camera a trigger pulse."""
-                def show(self, phase):
-                    super().show(phase)
-                    object.__setattr__(cam, "slm_written", True)
-            with TriggeringSLM() as pulse_slm:
-                warm_up(pulse_slm, camera)
+        class TriggeringSLM(FakeSLM):
+            """A fake SLM whose every image sends the stand-in camera a trigger pulse (the moment of the write)."""
+            def show(self, phase):
+                super().show(phase)
+                object.__setattr__(cam, "slm_written_t", time.monotonic())
+        with TriggeringSLM() as pulse_slm:
+            warm_up(pulse_slm, camera)
+            frame = measure(pulse_slm, camera, np.full(pulse_slm.shape, 128, dtype=np.uint8))
+            assert frame.shape == camera.shape and cam.frames == warm_open + s["warmup_frames"] + 1
+            print(f"stand-in camera, trigger {on}: warm_up and measure() give frames")
+            if on:
+                # show, sleep settle_s, grab: the triggered frame came during the sleep and is lost.
                 pulse_slm.show(np.zeros(pulse_slm.shape, dtype=np.uint8))
-                frame = camera.grab()
-            assert frame.shape == camera.shape and cam.frames == s["warmup_frames"] + 1
+                time.sleep(s["settle_s"])
+                try:
+                    camera.grab()
+                    raise AssertionError("with the trigger, show + sleep + grab must lose the frame")
+                except HardwareError as error:
+                    print(f"stand-in camera, trigger on, show + sleep {s['settle_s']} s + grab: {error}")
         print(f"stand-in camera, trigger {on}: settings passed {settings_ok}, warm-up frames in open() {warm_open}, "
               f"trigger {vars(trigger)}, debounce on input {s['trigger_input']}: "
               f"{cam.pio_ports[s['trigger_input']].debounce_time}")

@@ -296,7 +296,9 @@ HARDWARE = {
     "trigger_edge": True,          # camera detect_external_input_edge (a plain bool) [source: lab PC config4, 2026-11-26]
     "trigger_debounce": 0,         # camera debounce_time [source: lab PC config4, 2026-11-26]
     "trigger_delay": 3000,         # camera trigger delay [source: lab PC config4 / utils.py, 2026-11-26]
-    "settle_s": 0.05,              # s, wait after an SLM image before a camera frame [source: lab PC config4 / utils.py, 2026-11-26]
+    "settle_s": 0.05,              # s, wait after an SLM image before a camera frame [source: lab PC config4 / utils.py, 2026-11-26];
+                                   # used only without the trigger; with the trigger the camera trigger delay does the
+                                   # settling [source: lab PC test 2026-11-27]
     "out_dir": "results/real_box/hardware_test",      # hardware_test.py with the real devices
     "fake_out_dir": "results/hardware_test_fake",     # hardware_test.py with the fake devices (not committed)
 }
