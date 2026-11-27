@@ -202,8 +202,10 @@ class RealCamera:
         self.close()
 
     def open(self) -> "RealCamera":
-        """Init the camera, set the window and settings and the frame start trigger (acquire off while setting), start
-        acquiring and drop warmup_frames frames."""
+        """Open the camera in the order of the lab's working open_camera() (tm_engineering utils.py): camera index before
+        and after init, acquire off; video mode and window size BEFORE the window start (start + size may not exceed the
+        sensor); ADC resolution and gain; the frame start trigger (debounce on its input port); colour coding and
+        shutter; acquire on, then the frame rate; then drop warmup_frames frames."""
         import alkusb3
         s = self.s
         if s["trigger"] and s["trigger_edge"] is None:
@@ -213,29 +215,27 @@ class RealCamera:
             self.cam.camera = s["camera_index"]
             self.cam.init()
             self.cam.acquire = False
-            for name in ("image_start_x", "image_start_y", "image_size_x", "image_size_y", "video_mode"):
+            self.cam.camera = s["camera_index"]
+            # The window size before its start: the camera refuses a start + (old, full) size beyond the sensor.
+            for name in ("video_mode", "image_size_x", "image_size_y", "image_start_x", "image_start_y"):
                 setattr(self.cam, name, s[name])
             self.cam.ADCResolution = s["adc_resolution"]
             self.cam.digital_gain = s["digital_gain"]
-            self.cam.color_coding = getattr(alkusb3.color_coding, s["color_coding"])
-            self.cam.shutter = s["shutter"]
-            self.cam.frame_rate = s["frame_rate"]
             trigger = self.cam.frame_start_trigger
             if s["trigger"]:
+                self.cam.pio_ports[s["trigger_input"]].debounce_time = s["trigger_debounce"]
                 trigger.source = alkusb3.trigger_source.external
                 trigger.external_input = s["trigger_input"]
                 trigger.detect_external_input_edge = s["trigger_edge"]
                 trigger.invert_external_input = True
                 trigger.delay = s["trigger_delay"]
-                # debounce_time: on the frame start trigger if it has one, else on the camera; set only where it exists.
-                for owner in (trigger, self.cam):
-                    if hasattr(owner, "debounce_time"):
-                        owner.debounce_time = s["trigger_debounce"]
-                        break
                 trigger.enabled = True
             else:
                 trigger.enabled = False
+            self.cam.color_coding = getattr(alkusb3.color_coding, s["color_coding"])
+            self.cam.shutter = s["shutter"]
             self.cam.acquire = True
+            self.cam.frame_rate = s["frame_rate"]                 # after acquire, as in the lab code
             for _ in range(s["warmup_frames"]):
                 self.grab()
         except HardwareError:
@@ -346,16 +346,33 @@ if __name__ == "__main__":
 
     # 2. RealCamera.open with a stand-in alkusb3 module: every setting and the trigger are passed through, the
     # warm-up frames are dropped, and the camera stops acquiring when closed.
+    SENSOR = {"x": 1232, "y": 1028}     # x from the real camera's error message; y assumed (full height)
+
     class StandInCamera:
-        """Records what open() sets; get_raw_data counts the frames."""
+        """Like the real camera: a full-sensor window at first, start + size may never exceed the sensor; records the
+        order of every setting; get_raw_data counts the frames."""
         def __init__(self):
-            self.frame_start_trigger, self.frames = types.SimpleNamespace(debounce_time=None), 0
+            for name, value in [("order", []), ("frames", 0), ("frame_start_trigger", types.SimpleNamespace()),
+                                ("pio_ports", [types.SimpleNamespace(debounce_time=None) for _ in range(4)]),
+                                ("image_start_x", 0), ("image_start_y", 0), ("image_size_x", SENSOR["x"]),
+                                ("image_size_y", SENSOR["y"])]:
+                object.__setattr__(self, name, value)
+
+        def __setattr__(self, name, value):
+            for axis in ("x", "y"):
+                if name in (f"image_start_{axis}", f"image_size_{axis}"):
+                    start = value if name.startswith("image_start") else getattr(self, f"image_start_{axis}")
+                    size = value if name.startswith("image_size") else getattr(self, f"image_size_{axis}")
+                    if start + size > SENSOR[axis]:
+                        raise ValueError(f"ImageStart{axis.upper()} + ImageSize{axis.upper()} cannot exceed {SENSOR[axis]}")
+            self.order.append((name, value))
+            object.__setattr__(self, name, value)
 
         def init(self):
-            pass
+            self.order.append(("init", None))
 
         def get_raw_data(self):
-            self.frames += 1
+            object.__setattr__(self, "frames", self.frames + 1)        # a frame, not a setting
             return bytes(SETTINGS["image_size_x"] * SETTINGS["image_size_y"])
 
     stand_in = types.SimpleNamespace(generic_camera=StandInCamera,
@@ -370,17 +387,32 @@ if __name__ == "__main__":
         settings_ok = (cam.image_start_x, cam.image_size_y, cam.ADCResolution, cam.color_coding, cam.shutter,
                        cam.frame_rate) == (s["image_start_x"], s["image_size_y"], s["adc_resolution"], "raw8 coding",
                                            s["shutter"], s["frame_rate"])
+        names = [name for name, _ in cam.order]
         print(f"stand-in camera, trigger {on}: settings passed {settings_ok}, warm-up frames {cam.frames}, "
-              f"trigger {vars(trigger)}")
+              f"trigger {vars(trigger)}, debounce on input {s['trigger_input']}: "
+              f"{cam.pio_ports[s['trigger_input']].debounce_time}")
         assert settings_ok and cam.frames == s["warmup_frames"] and cam.acquire is True
+        # The lab's order: camera, init, acquire off, camera again; size before start; frame rate after acquire on.
+        assert names[:4] == ["camera", "init", "acquire", "camera"], names[:4]
+        assert names.index("image_size_x") < names.index("image_start_x") and \
+            names.index("image_size_y") < names.index("image_start_y")
+        assert names.index("frame_rate") == len(names) - 1 and cam.order[-2] == ("acquire", True)
         if on:
-            assert vars(trigger) == {"debounce_time": s["trigger_debounce"], "source": "external source",
-                                     "external_input": s["trigger_input"], "detect_external_input_edge": True,
-                                     "invert_external_input": True, "delay": s["trigger_delay"], "enabled": True}
+            assert vars(trigger) == {"source": "external source", "external_input": s["trigger_input"],
+                                     "detect_external_input_edge": True, "invert_external_input": True,
+                                     "delay": s["trigger_delay"], "enabled": True}
+            assert cam.pio_ports[s["trigger_input"]].debounce_time == s["trigger_debounce"]
         else:
-            assert vars(trigger) == {"debounce_time": None, "enabled": False}
+            assert vars(trigger) == {"enabled": False} and cam.pio_ports[s["trigger_input"]].debounce_time is None
         camera.close()
         assert cam.acquire is False and camera.cam is None
+    old_order = StandInCamera()
+    try:
+        for name in ("image_start_x", "image_start_y", "image_size_x", "image_size_y"):     # the old order: start first
+            setattr(old_order, name, SETTINGS[name])
+        raise AssertionError("the old order (start before size) must fail on the stand-in camera")
+    except ValueError as error:
+        print(f"old order (start before size): {error}")
     try:
         RealCamera({**SETTINGS, "trigger": True, "trigger_edge": None}).open()
         raise AssertionError("trigger on without trigger_edge must raise")
