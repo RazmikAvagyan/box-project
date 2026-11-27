@@ -43,42 +43,43 @@ def make_transmission_matrix(N: int, M: int, rng: np.random.Generator) -> np.nda
     return X.astype(np.complex128)
 
 
-def gray_to_phase(gray: np.ndarray) -> np.ndarray:
-    """Convert 8-bit SLM gray values to phase: phase = 2*pi*g/255.
+def gray_to_phase(gray: np.ndarray, levels: int = 255) -> np.ndarray:
+    """Convert 8-bit SLM gray values to phase: phase = 2*pi*g/levels.
 
-    Input: gray, any shape, values in [0, 255].
+    Input: gray, any shape, values in [0, 255]; levels: gray values per 2*pi (255 in the simulation: g = 0 and
+    g = 255 both mean "no delay"; 256 on the real SLM's LUT, where 128 = pi).
     Returns: phase in radians, same shape, float64.
-    Note: g = 0 and g = 255 both mean "no delay" (0 and 2*pi).
     """
     g = np.asarray(gray, dtype=np.float64)
-    return TWO_PI * g / 255.0
+    return TWO_PI * g / levels
 
 
-def phase_to_gray(phase: np.ndarray) -> np.ndarray:
+def phase_to_gray(phase: np.ndarray, levels: int = 255) -> np.ndarray:
     """Convert phase (radians) to 8-bit SLM gray values.
 
-    g = round((phase mod 2*pi) / (2*pi) * 255), always in [0, 255].
+    g = round((phase mod 2*pi) / (2*pi) * levels), always in [0, 255] (with levels 256 a rounded 256 = 2*pi wraps to 0).
 
-    Input: phase, any shape (any real values; wrapped mod 2*pi).
+    Input: phase, any shape (any real values; wrapped mod 2*pi); levels as in gray_to_phase.
     Returns: gray, same shape, uint8.
     """
     p = np.mod(np.asarray(phase, dtype=np.float64), TWO_PI)
-    g = np.round(p / TWO_PI * 255.0)
+    g = np.round(p / TWO_PI * levels)
+    g = np.where(g > 255, g - levels, g)
     return g.astype(np.uint8)
 
 
-def make_slm_patterns(L: int, N: int, rng: np.random.Generator, quantize: bool = True) -> np.ndarray:
+def make_slm_patterns(L: int, N: int, rng: np.random.Generator, quantize: bool = True, levels: int = 255) -> np.ndarray:
     """Random phase-only SLM patterns, one pattern per row.
 
     Each entry has amplitude 1 (phase-only SLM) and a random phase in [0, 2*pi).
     If quantize=True the phase is rounded to what an 8-bit SLM can show
-    (phase -> gray -> phase).
+    (phase -> gray -> phase, with `levels` gray values per 2*pi).
 
     Returns: E_in, shape (L, N), complex128.
     """
     phase = rng.uniform(0.0, TWO_PI, size=(L, N))
     if quantize:
-        phase = gray_to_phase(phase_to_gray(phase))
+        phase = gray_to_phase(phase_to_gray(phase, levels), levels)
     # Phase-only modulation: |E| = 1 everywhere, only the delay changes.
     return np.exp(1j * phase).astype(np.complex128)
 

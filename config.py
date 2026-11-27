@@ -282,6 +282,18 @@ HARDWARE = {
     "slm_macro_grid": 4,           # macro pixels per side (n_input 16 = 4 x 4; 1024 / 4 = 256 px each) [source: lab PC model/utils.py + config4 model section, 2026-11-27]
     "slm_gap_px": 14,              # px, inter_pixel_distance: masked rows/columns at the start of each macro pixel [source: lab PC model/utils.py + config4 model section, 2026-11-27]
     "slm_bias_grating": 128,       # added to every second column (uint8, wraps) [source: lab PC model/utils.py + config4 model section, 2026-11-27]
+    "slm_phase_levels": 256,       # gray values per 2 pi on the real SLM: its LUT puts 128 at pi (the simulation uses
+                                   # 255) [source: lab PC model/utils.py, 2026-11-27]
+    # RealLab maps (real_lab/lab.py): N = slm_macro_grid^2 inputs, M = out_grid^2 outputs (camera intensity 48 x 48
+    # block-averaged to out_grid x out_grid; 8 -> M 64 as in the simulation)
+    "out_grid": 8,                 # [estimate]
+    "min_light": 10.0,             # counts, a reference frame darker than this means no light on the camera [estimate:
+                                   # blank SLM ~2, grating ~62 on the lab PC, 2026-11-27]
+    "pattern_seed": 0,             # random SLM patterns of RealLab (one generator for the whole lab)
+    "ggs_seed": 1,                 # GGS random starts of RealLab
+    "maps_dir": "results/real_box/maps",               # measure_map saves E_in, I, X_est, reference frame there
+    "fake_maps_dir": "results/hardware_test_fake/maps",   # the same with the fake devices (not committed)
+    "fake_grain_px": 12,           # px, speckle grain of the fake camera [estimate: fake devices only]
     # Camera: Alkeria Celera C5S-MP over USB3, Python module alkusb3 (on the lab PC) [source: lab PC config4 / utils.py, 2026-11-26]
     "camera_index": 0,             # [source: lab PC config4 / utils.py, 2026-11-26]
     "image_start_x": 1136,         # px, window corner [source: lab PC config4 / utils.py, 2026-11-26]
@@ -330,7 +342,8 @@ REAL_BOX = {
     "timeout_s": 1.5,                                    # s, box request timeout (shorter than interval_s)
     "room_timeout_s": 20,                                # s, room request timeout (the response holds 7 days of history)
     "print_every_s": 30,                                 # s, one status line this often
-    "ca_file": "/etc/ssl/cert.pem",                      # macOS CA bundle; the python.org Python has none of its own
+    # macOS CA bundle (the python.org Python has none of its own); elsewhere (e.g. Windows) None = the system default
+    "ca_file": "/etc/ssl/cert.pem" if os.path.exists("/etc/ssl/cert.pem") else None,
     "user_agent": "real-box-logger",                     # the room server answers 403 to the default Python-urllib agent
     # Write path of the box web API on the host of BOX_URL, JSON {"target": T} (real_lab/lab.py) [source: box web page,
     # 2026-11-26]. The box also has POST /api/pid {"kp", "ki", "kd"}, not used here, and no on/off endpoint.

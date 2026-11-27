@@ -19,13 +19,13 @@ from config import OPTICS
 from optics_simulation import lab
 
 
-def focus_pattern(X_est: np.ndarray, targets: int | list[int], quantize: bool = True) -> np.ndarray:
+def focus_pattern(X_est: np.ndarray, targets: int | list[int], quantize: bool = True, levels: int = 255) -> np.ndarray:
     """Phase-only SLM pattern that focuses light on the target camera point(s).
 
     E_in[n] = exp(-1j * angle(sum over targets m of X_est[n, m]))
 
     Input: X_est (N, M); targets: one camera index or a list of them.
-           quantize: round the phase to 8-bit SLM levels.
+           quantize: round the phase to 8-bit SLM levels (`levels` gray values per 2*pi, see lab.gray_to_phase).
     Returns: E_in, shape (1, N), complex128.
     """
     cols = np.atleast_1d(targets)
@@ -34,7 +34,7 @@ def focus_pattern(X_est: np.ndarray, targets: int | list[int], quantize: bool = 
     # For several targets, conjugate the sum of their columns.
     phase = -np.angle(X_est[:, cols].sum(axis=1))
     if quantize:
-        phase = lab.gray_to_phase(lab.phase_to_gray(phase))
+        phase = lab.gray_to_phase(lab.phase_to_gray(phase, levels), levels)
     return np.exp(1j * phase)[np.newaxis, :]
 
 

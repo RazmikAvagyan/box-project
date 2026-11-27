@@ -292,13 +292,14 @@ class RealCamera:
 class FakeCamera:
     """A stand-in camera in the first diffraction order of the SLM's column grating: the field of each of 16 x 16 blocks
     is the mean of exp(i phase) * (-1)^column (zero for a flat image, full for the bias grating), sent through a fixed
-    random transmission, plus camera noise; raw frames of the configured size (float32 counts 0..255). So a blank SLM
+    random transmission to speckle grains of fake_grain_px pixels, plus camera noise; raw frames of the configured size (float32 counts 0..255). So a blank SLM
     gives a dark frame and the grating a bright speckle, as on the real setup."""
 
     def __init__(self, slm: FakeSLM | None = None, s: dict = SETTINGS, seed: int = 0):
         self.s, self.slm, self.shape, self.is_open = s, slm, (s["image_size_y"], s["image_size_x"]), False
         self.rng = np.random.default_rng(seed)
-        n_in, n_out = 16 * 16, self.shape[0] * self.shape[1]
+        self.grain = s["fake_grain_px"]                           # speckle grain: one random output per grain
+        n_in, n_out = 16 * 16, (self.shape[0] // self.grain) * (self.shape[1] // self.grain)
         self.T = (self.rng.normal(size=(n_in, n_out)) + 1j * self.rng.normal(size=(n_in, n_out))) / np.sqrt(2 * n_in)
 
     def __enter__(self):
@@ -322,7 +323,9 @@ class FakeCamera:
         first_order = np.exp(2j * np.pi * phase / 256.0) * np.where(np.arange(w) % 2 == 0, 1.0, -1.0)
         blocks = first_order[: h - h % 16, : w - w % 16].reshape(16, h // 16, 16, w // 16).mean(axis=(1, 3))
         E_in = blocks.reshape(1, -1)                                  # (1 x N), row convention E_out = E_in @ T
-        frame = 200 * np.abs(E_in @ self.T).reshape(self.shape) ** 2 / 3.0 + self.rng.normal(0, 1, self.shape) + 2
+        coarse = np.abs(E_in @ self.T).reshape(self.shape[0] // self.grain, self.shape[1] // self.grain) ** 2
+        speckle = np.kron(coarse, np.ones((self.grain, self.grain)))  # grains of grain x grain pixels
+        frame = 200 * speckle / 3.0 + self.rng.normal(0, 1, self.shape) + 2
         return np.clip(np.round(frame), 0, 255).astype(np.float32)
 
     def grab_intensity(self) -> np.ndarray:
